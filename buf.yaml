@@ -1,4 +1,7 @@
 version: v2
+# These deps are declared for future local .proto files that import googleapis types.
+# Code generation (buf.gen.yaml) uses a git_repo input directly because
+# the BSR googleapis module does not include Firestore v1 protos.
 deps:
   - buf.build/googleapis/googleapis
   - buf.build/grpc-ecosystem/grpc-gateway
