@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/petereon/firstyr/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -19,8 +20,8 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "sqlite", cfg.Backend.Type)
 	assert.Equal(t, "info", cfg.Log.Level)
 	assert.Equal(t, "json", cfg.Log.Format)
-	assert.Equal(t, "60s", cfg.Transactions.TTL)
-	assert.Equal(t, "30s", cfg.Transactions.SweepInterval)
+	assert.Equal(t, 60*time.Second, cfg.Transactions.TTL)
+	assert.Equal(t, 30*time.Second, cfg.Transactions.SweepInterval)
 }
 
 func TestLoad_FromFile(t *testing.T) {

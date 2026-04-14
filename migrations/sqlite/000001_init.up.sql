@@ -25,3 +25,5 @@ CREATE TABLE IF NOT EXISTS transactions (
     reads       TEXT,
     expires_at  TEXT    NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_transactions_expires_at ON transactions(expires_at);

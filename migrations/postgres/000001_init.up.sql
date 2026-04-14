@@ -26,3 +26,5 @@ CREATE TABLE IF NOT EXISTS transactions (
     reads       JSONB,
     expires_at  TIMESTAMPTZ NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_transactions_expires_at ON transactions(expires_at);

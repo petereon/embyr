@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -56,8 +58,8 @@ type SQLiteConfig struct {
 
 // TransactionConfig controls transaction TTL and expired-transaction sweep frequency.
 type TransactionConfig struct {
-	TTL           string `mapstructure:"ttl"`
-	SweepInterval string `mapstructure:"sweep_interval"`
+	TTL           time.Duration `mapstructure:"ttl"`
+	SweepInterval time.Duration `mapstructure:"sweep_interval"`
 }
 
 // LogConfig selects the log level and output format.
@@ -78,8 +80,8 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("backend.type", "sqlite")
 	v.SetDefault("backend.sqlite.path", "firstyr.db")
 	v.SetDefault("backend.postgres.max_conns", 25)
-	v.SetDefault("transactions.ttl", "60s")
-	v.SetDefault("transactions.sweep_interval", "30s")
+	v.SetDefault("transactions.ttl", 60*time.Second)
+	v.SetDefault("transactions.sweep_interval", 30*time.Second)
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
 
@@ -106,7 +108,9 @@ func Load(path string) (*Config, error) {
 		"log.format",
 	}
 	for _, key := range envBindings {
-		_ = v.BindEnv(key)
+		if err := v.BindEnv(key); err != nil {
+			return nil, fmt.Errorf("config: bind env %s: %w", key, err)
+		}
 	}
 
 	if path != "" {
