@@ -1,0 +1,9 @@
+# Go binaries
+firstyr
+/dist/
+
+# Go test cache
+*.test
+
+# Go build artifacts
+*.out
