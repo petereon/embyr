@@ -1,7 +1,7 @@
 .PHONY: proto build test lint clean
 
 BINARY=firstyr
-MODULE=github.com/firstyr/firstyr
+MODULE=github.com/petereon/firstyr
 
 proto:
 	buf generate
