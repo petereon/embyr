@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
@@ -20,7 +19,6 @@ type listenBridge struct {
 	ctx    context.Context
 	sendCh chan *firestorev1.ListenResponse
 	recvCh chan *firestorev1.ListenRequest
-	mu     sync.Mutex
 }
 
 func newListenBridge(ctx context.Context) *listenBridge {
@@ -93,7 +91,7 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 
 		reqs, _ := parseForwardBody(r)
 
-		ctx, cancel := context.WithCancel(r.Context())
+		ctx, cancel := context.WithCancel(context.Background())
 		bridge := newListenBridge(ctx)
 
 		go func() {
