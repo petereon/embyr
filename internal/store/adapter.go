@@ -69,4 +69,10 @@ type StorageAdapter interface {
 
 	// SweepExpiredTransactions deletes transaction records whose expires_at is in the past.
 	SweepExpiredTransactions(ctx context.Context) (deleted int, err error)
+
+	// Subscribe returns a channel that receives DocChange events for every
+	// committed write to this database. The caller must invoke the returned
+	// cancel function when it no longer needs the subscription to free resources.
+	// Multiple concurrent subscribers are supported; each receives all changes.
+	Subscribe() (<-chan DocChange, func())
 }
