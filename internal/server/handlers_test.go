@@ -10,16 +10,28 @@ import (
 	"testing"
 	"time"
 
+	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
 	"github.com/petereon/firstyr/internal/config"
 	"github.com/petereon/firstyr/internal/server"
 	"github.com/petereon/firstyr/internal/store/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
-// startTestServer starts a server with a fresh SQLite database and returns the REST base URL.
-func startTestServer(t *testing.T) string {
+// testServer holds the REST base URL and gRPC address of a running test server.
+type testServer struct {
+	restBase string
+	grpcAddr string
+}
+
+// startTestServer starts a server with a fresh SQLite database and returns a testServer
+// containing both the REST base URL and the gRPC address.
+func startTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dir := t.TempDir()
 	adapter, err := sqlite.New(dir+"/test.db", "../../migrations/sqlite")
@@ -56,7 +68,19 @@ func startTestServer(t *testing.T) string {
 		return resp.StatusCode == http.StatusOK
 	}, 3*time.Second, 50*time.Millisecond, "server did not become ready")
 
-	return restBase
+	return &testServer{
+		restBase: restBase,
+		grpcAddr: fmt.Sprintf("127.0.0.1:%d", grpcPort),
+	}
+}
+
+// grpcClient dials the gRPC port of ts and returns a Firestore client.
+func grpcClient(t *testing.T, ts *testServer) firestorev1.FirestoreClient {
+	t.Helper()
+	conn, err := grpc.NewClient(ts.grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	return firestorev1.NewFirestoreClient(conn)
 }
 
 // listCollection is a helper that GETs the REST ListDocuments endpoint for a top-level
@@ -77,20 +101,14 @@ func listCollection(t *testing.T, base, project, database, collectionID string) 
 	return result
 }
 
-// TestRPC_CreateAndGetDocument creates a document, then verifies it appears in the
-// collection listing. Direct GetDocument via REST is not independently testable for
-// top-level documents in this gateway configuration: the pattern
-// GET /v1/{name=projects/*/databases/*/documents/*/**} is shadowed by the more-specific
-// ListDocuments pattern GET /v1/{parent=.../*/**}/{collection_id}, so every
-// two-segment document path is routed to ListDocuments instead of GetDocument.
-// Listing the parent collection exercises the same round-trip through CreateDocument
-// and the SQLite backend.
+// TestRPC_CreateAndGetDocument creates a document, then verifies it via both the
+// collection listing (REST) and a direct GetDocument call (gRPC).
 func TestRPC_CreateAndGetDocument(t *testing.T) {
-	base := startTestServer(t)
+	ts := startTestServer(t)
 
 	// CreateDocument via REST: POST /v1/{parent}/{collectionId}
 	body := `{"fields":{"name":{"stringValue":"Alice"},"age":{"integerValue":"30"}}}`
-	url := base + "/v1/projects/p/databases/d/documents/users"
+	url := ts.restBase + "/v1/projects/p/databases/d/documents/users"
 	resp, err := http.Post(url, "application/json", bytes.NewBufferString(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -105,22 +123,28 @@ func TestRPC_CreateAndGetDocument(t *testing.T) {
 
 	// Verify the document was persisted by listing its collection.
 	// GET /v1/projects/p/databases/d/documents/users → ListDocuments(parent=…/documents, collectionId=users)
-	result := listCollection(t, base, "p", "d", "users")
+	result := listCollection(t, ts.restBase, "p", "d", "users")
 	docs, ok := result["documents"].([]interface{})
 	require.True(t, ok, "listing users collection must return a 'documents' array; got: %v", result)
 	require.Len(t, docs, 1, "exactly one document should be in the collection")
 	doc := docs[0].(map[string]interface{})
 	assert.Equal(t, name, doc["name"], "listed document name must match the created document name")
+
+	// Verify via direct gRPC GetDocument call.
+	client := grpcClient(t, ts)
+	gdoc, err := client.GetDocument(context.Background(), &firestorev1.GetDocumentRequest{Name: name})
+	require.NoError(t, err)
+	assert.Equal(t, name, gdoc.GetName())
 }
 
 // TestRPC_CreateDocument_AlreadyExists verifies that a second CreateDocument call
 // with the same explicit document ID is rejected with HTTP 409 Conflict.
 func TestRPC_CreateDocument_AlreadyExists(t *testing.T) {
-	base := startTestServer(t)
+	ts := startTestServer(t)
 
 	// CreateDocument with explicit document ID.
 	body := `{"fields":{}}`
-	url := base + "/v1/projects/p/databases/d/documents/col?documentId=fixed-id"
+	url := ts.restBase + "/v1/projects/p/databases/d/documents/col?documentId=fixed-id"
 	resp, err := http.Post(url, "application/json", bytes.NewBufferString(body))
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -133,36 +157,30 @@ func TestRPC_CreateDocument_AlreadyExists(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp2.StatusCode)
 }
 
-// TestRPC_GetDocument_NotFound verifies that listing a collection that does not
-// exist returns an empty document list rather than an error. As documented in
-// TestRPC_CreateAndGetDocument, direct GetDocument calls for top-level documents are
-// routed to ListDocuments by the grpc-gateway pattern matcher; this test therefore
-// confirms the absence of a document by asserting that the collection list is empty.
+// TestRPC_GetDocument_NotFound verifies that GetDocument on a nonexistent path
+// returns codes.NotFound via gRPC.
 func TestRPC_GetDocument_NotFound(t *testing.T) {
-	base := startTestServer(t)
+	ts := startTestServer(t)
 
-	// GET /v1/.../documents/col → ListDocuments(parent=…/documents, collectionId=col)
-	// No documents have been created, so the response must be an empty list (HTTP 200).
-	result := listCollection(t, base, "p", "d", "col")
-
-	// An absent collection returns {} or {"documents":[]}, never a 4xx error.
-	if docs, ok := result["documents"]; ok {
-		assert.Empty(t, docs, "empty collection must contain no documents")
-	}
-	// else: result is {} which also means no documents — test passes implicitly.
+	client := grpcClient(t, ts)
+	_, err := client.GetDocument(context.Background(), &firestorev1.GetDocumentRequest{
+		Name: "projects/p/databases/d/documents/col/no-such-doc",
+	})
+	require.Error(t, err)
+	assert.Equal(t, codes.NotFound, status.Code(err))
 }
 
 // TestRPC_UpdateDocument_Upsert verifies that a PATCH to a document path that does
 // not yet exist creates it (upsert semantics) and returns the document with the
 // expected name.
 func TestRPC_UpdateDocument_Upsert(t *testing.T) {
-	base := startTestServer(t)
+	ts := startTestServer(t)
 
 	// PATCH via REST maps to UpdateDocument.
 	docName := "projects/p/databases/d/documents/col/mydoc"
 	body := `{"name":"` + docName + `","fields":{"x":{"stringValue":"hello"}}}`
 
-	req, err := http.NewRequest(http.MethodPatch, base+"/v1/"+docName, bytes.NewBufferString(body))
+	req, err := http.NewRequest(http.MethodPatch, ts.restBase+"/v1/"+docName, bytes.NewBufferString(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -177,13 +195,13 @@ func TestRPC_UpdateDocument_Upsert(t *testing.T) {
 }
 
 // TestRPC_DeleteDocument creates a document, deletes it, and then confirms the
-// collection is empty.
+// document is gone via gRPC GetDocument.
 func TestRPC_DeleteDocument(t *testing.T) {
-	base := startTestServer(t)
+	ts := startTestServer(t)
 
 	// Create a document with a known ID.
 	body := `{"fields":{}}`
-	url := base + "/v1/projects/p/databases/d/documents/col?documentId=todelete"
+	url := ts.restBase + "/v1/projects/p/databases/d/documents/col?documentId=todelete"
 	resp, err := http.Post(url, "application/json", bytes.NewBufferString(body))
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -191,29 +209,29 @@ func TestRPC_DeleteDocument(t *testing.T) {
 
 	// Delete it via DELETE /v1/{name}.
 	docName := "projects/p/databases/d/documents/col/todelete"
-	req, err := http.NewRequest(http.MethodDelete, base+"/v1/"+docName, nil)
+	req, err := http.NewRequest(http.MethodDelete, ts.restBase+"/v1/"+docName, nil)
 	require.NoError(t, err)
 	delResp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer delResp.Body.Close()
 	assert.Equal(t, http.StatusOK, delResp.StatusCode)
 
-	// Confirm the document is gone by listing the collection — it must be empty.
-	result := listCollection(t, base, "p", "d", "col")
-	if docs, ok := result["documents"]; ok {
-		assert.Empty(t, docs, "collection must be empty after the document was deleted")
-	}
+	// Confirm the document is gone via direct gRPC GetDocument call.
+	client := grpcClient(t, ts)
+	_, err = client.GetDocument(context.Background(), &firestorev1.GetDocumentRequest{Name: docName})
+	require.Error(t, err)
+	assert.Equal(t, codes.NotFound, status.Code(err))
 }
 
 // TestRPC_ListDocuments creates three documents and verifies they all appear in the
 // collection listing.
 func TestRPC_ListDocuments(t *testing.T) {
-	base := startTestServer(t)
+	ts := startTestServer(t)
 
 	// Create a few documents.
 	for _, id := range []string{"a", "b", "c"} {
 		body := `{"fields":{}}`
-		url := base + "/v1/projects/p/databases/d/documents/things?documentId=" + id
+		url := ts.restBase + "/v1/projects/p/databases/d/documents/things?documentId=" + id
 		resp, err := http.Post(url, "application/json", bytes.NewBufferString(body))
 		require.NoError(t, err)
 		resp.Body.Close()
@@ -221,7 +239,7 @@ func TestRPC_ListDocuments(t *testing.T) {
 	}
 
 	// List them.
-	result := listCollection(t, base, "p", "d", "things")
+	result := listCollection(t, ts.restBase, "p", "d", "things")
 	docs, ok := result["documents"].([]interface{})
 	require.True(t, ok, "response must have 'documents' array; got: %v", result)
 	assert.Len(t, docs, 3)
