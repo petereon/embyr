@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -205,7 +206,39 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 			if mask := w.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
 				mode = store.WriteModeUpdate
 			}
-			sd, err := codec.ProtoToStore(doc)
+
+			// Apply field transforms if present.
+			transforms := w.GetUpdateTransforms()
+			fields := doc.GetFields()
+			if len(transforms) > 0 {
+				var currFields map[string]*firestorev1.Value
+				// Only read current doc if transforms need it (non-REQUEST_TIME transforms).
+				needsRead := false
+				for _, t := range transforms {
+					switch t.GetTransformType().(type) {
+					case *firestorev1.DocumentTransform_FieldTransform_Increment,
+						*firestorev1.DocumentTransform_FieldTransform_AppendMissingElements,
+						*firestorev1.DocumentTransform_FieldTransform_RemoveAllFromArray:
+						needsRead = true
+					}
+				}
+				if needsRead {
+					curr, err := s.db.GetDocument(ctx, doc.GetName())
+					if err == nil {
+						currDoc, _ := codec.StoreToProto(curr)
+						currFields = currDoc.GetFields()
+					}
+					// If err == codes.NotFound, currFields stays nil (new document).
+				}
+				var transformErr error
+				fields, transformErr = applyFieldTransforms(fields, transforms, currFields, now)
+				if transformErr != nil {
+					return nil, transformErr
+				}
+			}
+
+			writeDoc := &firestorev1.Document{Name: doc.GetName(), Fields: fields}
+			sd, err := codec.ProtoToStore(writeDoc)
 			if err != nil {
 				return nil, status.Errorf(codes.Internal, "encode document: %v", err)
 			}
@@ -367,4 +400,125 @@ func applyMask(current, incoming map[string]*firestorev1.Value, maskPaths []stri
 		}
 	}
 	return result
+}
+
+// applyFieldTransforms applies field transforms to fields map in place.
+// currFields is the existing document's fields (nil if document doesn't exist yet).
+// now is the server timestamp used for REQUEST_TIME transforms.
+func applyFieldTransforms(
+	fields map[string]*firestorev1.Value,
+	transforms []*firestorev1.DocumentTransform_FieldTransform,
+	currFields map[string]*firestorev1.Value,
+	now time.Time,
+) (map[string]*firestorev1.Value, error) {
+	if len(transforms) == 0 {
+		return fields, nil
+	}
+	// Copy so we don't mutate the input proto.
+	result := make(map[string]*firestorev1.Value, len(fields))
+	for k, v := range fields {
+		result[k] = v
+	}
+
+	for _, t := range transforms {
+		fp := t.GetFieldPath()
+		// Only top-level field paths supported in plan 3.
+		if strings.ContainsRune(fp, '.') {
+			return nil, status.Errorf(codes.Unimplemented, "nested field transforms not yet supported: %s", fp)
+		}
+
+		switch tt := t.GetTransformType().(type) {
+
+		case *firestorev1.DocumentTransform_FieldTransform_SetToServerValue:
+			if tt.SetToServerValue == firestorev1.DocumentTransform_FieldTransform_REQUEST_TIME {
+				result[fp] = &firestorev1.Value{
+					ValueType: &firestorev1.Value_TimestampValue{
+						TimestampValue: timestamppb.New(now),
+					},
+				}
+			}
+
+		case *firestorev1.DocumentTransform_FieldTransform_Increment:
+			delta := tt.Increment
+			curr := currFields[fp]
+			switch d := delta.GetValueType().(type) {
+			case *firestorev1.Value_IntegerValue:
+				existing := int64(0)
+				if curr != nil {
+					if iv, ok := curr.GetValueType().(*firestorev1.Value_IntegerValue); ok {
+						existing = iv.IntegerValue
+					}
+				}
+				result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_IntegerValue{
+					IntegerValue: existing + d.IntegerValue,
+				}}
+			case *firestorev1.Value_DoubleValue:
+				existing := float64(0)
+				if curr != nil {
+					switch ev := curr.GetValueType().(type) {
+					case *firestorev1.Value_DoubleValue:
+						existing = ev.DoubleValue
+					case *firestorev1.Value_IntegerValue:
+						existing = float64(ev.IntegerValue)
+					}
+				}
+				result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_DoubleValue{
+					DoubleValue: existing + d.DoubleValue,
+				}}
+			}
+
+		case *firestorev1.DocumentTransform_FieldTransform_AppendMissingElements:
+			curr := currFields[fp]
+			var existing []*firestorev1.Value
+			if curr != nil {
+				if av, ok := curr.GetValueType().(*firestorev1.Value_ArrayValue); ok {
+					existing = av.ArrayValue.GetValues()
+				}
+			}
+			incoming := tt.AppendMissingElements.GetValues()
+			merged := append([]*firestorev1.Value(nil), existing...)
+			for _, v := range incoming {
+				found := false
+				for _, e := range existing {
+					if proto.Equal(e, v) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					merged = append(merged, v)
+				}
+			}
+			result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
+				ArrayValue: &firestorev1.ArrayValue{Values: merged},
+			}}
+
+		case *firestorev1.DocumentTransform_FieldTransform_RemoveAllFromArray:
+			curr := currFields[fp]
+			var existing []*firestorev1.Value
+			if curr != nil {
+				if av, ok := curr.GetValueType().(*firestorev1.Value_ArrayValue); ok {
+					existing = av.ArrayValue.GetValues()
+				}
+			}
+			toRemove := tt.RemoveAllFromArray.GetValues()
+			kept := existing[:0:0]
+			for _, e := range existing {
+				remove := false
+				for _, r := range toRemove {
+					if proto.Equal(e, r) {
+						remove = true
+						break
+					}
+				}
+				if !remove {
+					kept = append(kept, e)
+				}
+			}
+			result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
+				ArrayValue: &firestorev1.ArrayValue{Values: kept},
+			}}
+		}
+	}
+	return result, nil
 }

@@ -319,3 +319,38 @@ func TestRunQuery_WithFilter(t *testing.T) {
 	}
 	require.Equal(t, 2, docs, "expected 2 active documents")
 }
+
+// TestCommit_ServerTimestamp verifies that serverTimestamp transforms work in Commit.
+func TestCommit_ServerTimestamp(t *testing.T) {
+	srv := startTestServer(t)
+	ctx := context.Background()
+	client := grpcClient(t, srv)
+
+	docPath := "projects/p/databases/(default)/documents/ts/doc1"
+	resp, err := client.Commit(ctx, &firestorev1.CommitRequest{
+		Database: "projects/p/databases/(default)",
+		Writes: []*firestorev1.Write{{
+			Operation: &firestorev1.Write_Update{
+				Update: &firestorev1.Document{
+					Name:   docPath,
+					Fields: map[string]*firestorev1.Value{},
+				},
+			},
+			UpdateTransforms: []*firestorev1.DocumentTransform_FieldTransform{{
+				FieldPath: "createdAt",
+				TransformType: &firestorev1.DocumentTransform_FieldTransform_SetToServerValue{
+					SetToServerValue: firestorev1.DocumentTransform_FieldTransform_REQUEST_TIME,
+				},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.WriteResults, 1)
+
+	// Verify the field was set
+	doc, err := client.GetDocument(ctx, &firestorev1.GetDocumentRequest{Name: docPath})
+	require.NoError(t, err)
+	_, ok := doc.Fields["createdAt"]
+	require.True(t, ok, "createdAt field should have been set by serverTimestamp")
+	require.NotNil(t, doc.Fields["createdAt"].GetTimestampValue(), "createdAt should be a timestamp")
+}
