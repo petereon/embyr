@@ -44,7 +44,12 @@ func (s *firestoreServer) CreateDocument(ctx context.Context, req *firestorev1.C
 	if docID == "" {
 		docID = codec.NewDocumentID()
 	}
-	path := codec.BuildPath(req.GetParent(), req.GetCollectionId(), docID)
+	// The grpc-gateway may append a trailing slash to the parent path variable when
+	// the ** wildcard in the URL pattern captures zero segments (e.g. top-level
+	// collections). Normalise the parent before constructing the document path so
+	// we never store paths with double slashes.
+	parent := strings.TrimRight(req.GetParent(), "/")
+	path := codec.BuildPath(parent, req.GetCollectionId(), docID)
 
 	inDoc := req.GetDocument()
 	writeProto := &firestorev1.Document{Name: path}

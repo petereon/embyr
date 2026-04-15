@@ -53,6 +53,7 @@ func TestServer_StartsAndServes(t *testing.T) {
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", restPort))
 	require.NoError(t, err)
+	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	cancel()
