@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -24,10 +25,14 @@ type Adapter struct {
 }
 
 // New opens a connection pool to the PostgreSQL database at dsn and returns a ready Adapter.
-func New(dsn, migrationsPath string) (*Adapter, error) {
+// maxConns sets the maximum number of open connections (0 = database/sql default, unlimited).
+func New(dsn, migrationsPath string, maxConns int) (*Adapter, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: open: %w", err)
+	}
+	if maxConns > 0 {
+		db.SetMaxOpenConns(maxConns)
 	}
 	return &Adapter{db: db, migrationsPath: migrationsPath}, nil
 }
@@ -59,4 +64,31 @@ func (a *Adapter) Migrate(ctx context.Context) error {
 // Close releases the database connection pool.
 func (a *Adapter) Close() error {
 	return a.db.Close()
+}
+
+// ─── Document CRUD stubs (Plan 2 — implemented in a future task) ─────────────
+
+// CreateDocument is not yet implemented for PostgreSQL.
+func (a *Adapter) CreateDocument(_ context.Context, _ *store.Document) (*store.Document, error) {
+	return nil, errors.New("postgres: CreateDocument not implemented")
+}
+
+// GetDocument is not yet implemented for PostgreSQL.
+func (a *Adapter) GetDocument(_ context.Context, _ string) (*store.Document, error) {
+	return nil, errors.New("postgres: GetDocument not implemented")
+}
+
+// UpdateDocument is not yet implemented for PostgreSQL.
+func (a *Adapter) UpdateDocument(_ context.Context, _ *store.Document, _ store.WriteMode) (*store.Document, error) {
+	return nil, errors.New("postgres: UpdateDocument not implemented")
+}
+
+// DeleteDocument is not yet implemented for PostgreSQL.
+func (a *Adapter) DeleteDocument(_ context.Context, _ string, _ bool) error {
+	return errors.New("postgres: DeleteDocument not implemented")
+}
+
+// ListDocuments is not yet implemented for PostgreSQL.
+func (a *Adapter) ListDocuments(_ context.Context, _, _ string, _ int32, _ string) (*store.ListPage, error) {
+	return nil, errors.New("postgres: ListDocuments not implemented")
 }
