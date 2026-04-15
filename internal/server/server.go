@@ -84,7 +84,12 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("server: REST listen: %w", err)
 	}
 
-	restSrv := &http.Server{Handler: s.restMux}
+	restSrv := &http.Server{
+		Handler:           s.restMux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+	}
 
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error { return s.grpcServer.Serve(grpcLis) })

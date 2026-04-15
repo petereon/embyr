@@ -87,7 +87,7 @@ func pgParseCollection(path string) (collection, parent string) {
 		return "", ""
 	}
 	relative := parts[docsIdx+1:]
-	if len(relative) < 2 {
+	if len(relative) < 2 || len(relative)%2 != 0 {
 		return "", ""
 	}
 	collection = relative[len(relative)-2]

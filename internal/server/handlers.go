@@ -112,6 +112,10 @@ func (s *firestoreServer) UpdateDocument(ctx context.Context, req *firestorev1.U
 				return nil, err
 			}
 		} else {
+			// Document exists. InsertOnly precondition is violated — caller demanded non-existence.
+			if writeMode == store.WriteModeInsertOnly {
+				return nil, status.Errorf(codes.AlreadyExists, "document already exists: %s", doc.GetName())
+			}
 			currProto, err := codec.StoreToProto(curr)
 			if err != nil {
 				return nil, status.Errorf(codes.Internal, "decode current document: %v", err)
@@ -185,9 +189,10 @@ func (s *firestoreServer) ListDocuments(ctx context.Context, req *firestorev1.Li
 // Only top-level field paths are supported in Plan 2.
 func applyMask(current, incoming map[string]*firestorev1.Value, maskPaths []string) map[string]*firestorev1.Value {
 	result := make(map[string]*firestorev1.Value, len(current))
-	// NOTE: Value pointers from current are copied by reference, not deep-cloned.
+	// TODO(plan3): Value pointers from current are copied by reference, not deep-cloned.
 	// This is safe because neither the adapter nor codec mutates Value nodes after creation.
-	// Plan 3 must deep-clone here if a document cache with shared Value nodes is introduced.
+	// Plan 3 must deep-clone here if a document cache or proto pooling is introduced —
+	// both could cause silent aliasing corruption through this map.
 	for k, v := range current {
 		result[k] = v
 	}

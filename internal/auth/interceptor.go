@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -153,7 +154,7 @@ func validateGoogleToken(ctx context.Context, projectID string) error {
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		getTokenInfoURL()+"?id_token="+token, nil)
+		getTokenInfoURL()+"?id_token="+url.QueryEscape(token), nil)
 	if err != nil {
 		return status.Errorf(codes.Internal, "google token request: %v", err)
 	}
