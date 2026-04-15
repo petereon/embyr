@@ -7,7 +7,7 @@ import (
 
 // EncodePageToken encodes an integer offset as an opaque page token.
 func EncodePageToken(offset int) string {
-	return base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }
 
 // DecodePageToken decodes a page token back to an offset.
@@ -16,7 +16,7 @@ func DecodePageToken(token string) int {
 	if token == "" {
 		return 0
 	}
-	b, err := base64.StdEncoding.DecodeString(token)
+	b, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
 		return 0
 	}
