@@ -72,11 +72,8 @@ func QueryFromStructuredQuery(parent string, sq *firestorev1.StructuredQuery, li
 		q.PageSize = 300
 	}
 
-	if sc := sq.GetStartAt(); sc != nil {
-		q.StartCursor = protoCursor(sc, orderBys, false)
-	}
-	if sc := sq.GetEndAt(); sc != nil {
-		q.EndCursor = protoCursor(sc, orderBys, true)
+	if sq.GetStartAt() != nil || sq.GetEndAt() != nil {
+		return nil, status.Error(codes.Unimplemented, "query cursors (startAt/endAt) are not yet supported")
 	}
 
 	return q, nil
