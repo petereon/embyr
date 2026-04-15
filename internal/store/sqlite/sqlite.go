@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -70,6 +71,10 @@ type Adapter struct {
 	rawDB          *sql.DB   // for Ping, Close, BeginTx, migrations
 	db             sqlExecer // for CRUD (never mutated after construction)
 	migrationsPath string
+	// subscriber registry for real-time change notifications
+	subsMu  sync.RWMutex
+	subs    map[uint64]chan store.DocChange
+	subNext uint64
 }
 
 // New opens (or creates) a SQLite database at path and returns a ready Adapter.
@@ -120,6 +125,41 @@ func (a *Adapter) Migrate(ctx context.Context) error {
 // Close releases the database connection pool.
 func (a *Adapter) Close() error {
 	return a.rawDB.Close()
+}
+
+// notifySubscribers sends c to all current subscribers (non-blocking).
+func (a *Adapter) notifySubscribers(c store.DocChange) {
+	a.subsMu.RLock()
+	defer a.subsMu.RUnlock()
+	for _, ch := range a.subs {
+		select {
+		case ch <- c:
+		default:
+		}
+	}
+}
+
+// Subscribe returns a channel that receives DocChange events for every
+// committed write. The returned cancel function unregisters the subscriber
+// and closes the channel.
+func (a *Adapter) Subscribe() (<-chan store.DocChange, func()) {
+	ch := make(chan store.DocChange, 64)
+	a.subsMu.Lock()
+	id := a.subNext
+	a.subNext++
+	if a.subs == nil {
+		a.subs = make(map[uint64]chan store.DocChange)
+	}
+	a.subs[id] = ch
+	a.subsMu.Unlock()
+	return ch, func() {
+		a.subsMu.Lock()
+		delete(a.subs, id)
+		a.subsMu.Unlock()
+		close(ch)
+		for range ch {
+		}
+	}
 }
 
 // ─── Document CRUD ────────────────────────────────────────────────────────────
@@ -221,6 +261,14 @@ func (a *Adapter) CreateDocument(ctx context.Context, doc *store.Document) (*sto
 		}
 		return nil, fmt.Errorf("sqlite: create document: %w", err)
 	}
+	a.notifySubscribers(store.DocChange{
+		Path:       d.Path,
+		Collection: collection,
+		Parent:     parent,
+		Kind:       store.DocChangeUpsert,
+		Version:    d.Version,
+		Data:       d.Data,
+	})
 	return d, nil
 }
 
@@ -260,6 +308,14 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 		if err != nil {
 			return nil, fmt.Errorf("sqlite: upsert document: %w", err)
 		}
+		a.notifySubscribers(store.DocChange{
+			Path:       d.Path,
+			Collection: collection,
+			Parent:     parent,
+			Kind:       store.DocChangeUpsert,
+			Version:    d.Version,
+			Data:       d.Data,
+		})
 		return d, nil
 
 	case store.WriteModeUpdate:
@@ -271,6 +327,15 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 			}
 			return nil, fmt.Errorf("sqlite: update document: %w", err)
 		}
+		collection, parent := sqliteParseCollection(d.Path)
+		a.notifySubscribers(store.DocChange{
+			Path:       d.Path,
+			Collection: collection,
+			Parent:     parent,
+			Kind:       store.DocChangeUpsert,
+			Version:    d.Version,
+			Data:       d.Data,
+		})
 		return d, nil
 
 	case store.WriteModeInsertOnly:
@@ -288,6 +353,14 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 			}
 			return nil, fmt.Errorf("sqlite: insert-only document: %w", err)
 		}
+		a.notifySubscribers(store.DocChange{
+			Path:       d.Path,
+			Collection: collection,
+			Parent:     parent,
+			Kind:       store.DocChangeUpsert,
+			Version:    d.Version,
+			Data:       d.Data,
+		})
 		return d, nil
 
 	default:
@@ -307,6 +380,15 @@ func (a *Adapter) DeleteDocument(ctx context.Context, path string, mustExist boo
 	}
 	if mustExist && n == 0 {
 		return status.Errorf(codes.NotFound, "sqlite: document not found: %s", path)
+	}
+	if n > 0 {
+		collection, parent := sqliteParseCollection(path)
+		a.notifySubscribers(store.DocChange{
+			Path:       path,
+			Collection: collection,
+			Parent:     parent,
+			Kind:       store.DocChangeDelete,
+		})
 	}
 	return nil
 }
@@ -722,6 +804,10 @@ func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []stor
 				return nil, fmt.Errorf("sqlite: commit delete: %w", err)
 			}
 			results = append(results, store.WriteResult{UpdatedAt: now})
+
+		default:
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("sqlite: commit: unknown write op type %d", op.Type)
 		}
 	}
 

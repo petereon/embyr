@@ -313,6 +313,26 @@ func TestSQLiteAdapter_CreateDocument_InvalidPath(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
+func TestSubscribe_ReceivesChange(t *testing.T) {
+	a := newTestAdapter(t)
+	ch, cancel := a.Subscribe()
+	defer cancel()
+
+	_, err := a.CreateDocument(context.Background(), &store.Document{
+		Path: "projects/p/databases/d/documents/sub/doc1",
+		Data: `{"fields":{"y":{"stringValue":"hello"}}}`,
+	})
+	require.NoError(t, err)
+
+	select {
+	case change := <-ch:
+		require.Equal(t, "projects/p/databases/d/documents/sub/doc1", change.Path)
+		require.Equal(t, store.DocChangeUpsert, change.Kind)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for change")
+	}
+}
+
 func mustCreate(t *testing.T, a store.StorageAdapter, path, data string) *store.Document {
 	t.Helper()
 	d, err := a.CreateDocument(context.Background(), &store.Document{Path: path, Data: data})
