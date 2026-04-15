@@ -373,6 +373,116 @@ func TestBeginRollback(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestBatchGetDocuments_FoundAndMissing creates two documents, then calls
+// BatchGetDocuments asking for those two plus a nonexistent document.
+// It verifies that found docs are returned as Found results and the missing
+// doc is returned as a Missing result.
+func TestBatchGetDocuments_FoundAndMissing(t *testing.T) {
+	srv := startTestServer(t)
+	ctx := context.Background()
+	client := grpcClient(t, srv)
+
+	// Create two documents.
+	docA := "projects/p/databases/(default)/documents/batch/a"
+	docB := "projects/p/databases/(default)/documents/batch/b"
+	docMissing := "projects/p/databases/(default)/documents/batch/ghost"
+
+	for _, path := range []string{docA, docB} {
+		_, err := client.Commit(ctx, &firestorev1.CommitRequest{
+			Database: "projects/p/databases/(default)",
+			Writes: []*firestorev1.Write{{
+				Operation: &firestorev1.Write_Update{Update: &firestorev1.Document{
+					Name:   path,
+					Fields: map[string]*firestorev1.Value{"v": {ValueType: &firestorev1.Value_StringValue{StringValue: path}}},
+				}},
+			}},
+		})
+		require.NoError(t, err)
+	}
+
+	stream, err := client.BatchGetDocuments(ctx, &firestorev1.BatchGetDocumentsRequest{
+		Database:  "projects/p/databases/(default)",
+		Documents: []string{docA, docB, docMissing},
+	})
+	require.NoError(t, err)
+
+	var found, missing []string
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		switch r := resp.Result.(type) {
+		case *firestorev1.BatchGetDocumentsResponse_Found:
+			found = append(found, r.Found.GetName())
+		case *firestorev1.BatchGetDocumentsResponse_Missing:
+			missing = append(missing, r.Missing)
+		}
+	}
+
+	assert.ElementsMatch(t, []string{docA, docB}, found)
+	assert.ElementsMatch(t, []string{docMissing}, missing)
+}
+
+// TestBatchGetDocuments_NewTransaction verifies the new_transaction flow used
+// by runTransaction in the Firebase SDK: the first response must carry the
+// transaction ID with no document result, and subsequent responses carry found
+// or missing document results.
+func TestBatchGetDocuments_NewTransaction(t *testing.T) {
+	srv := startTestServer(t)
+	ctx := context.Background()
+	client := grpcClient(t, srv)
+
+	docPath := "projects/p/databases/(default)/documents/txcol/doc1"
+	_, err := client.Commit(ctx, &firestorev1.CommitRequest{
+		Database: "projects/p/databases/(default)",
+		Writes: []*firestorev1.Write{{
+			Operation: &firestorev1.Write_Update{Update: &firestorev1.Document{
+				Name:   docPath,
+				Fields: map[string]*firestorev1.Value{"x": {ValueType: &firestorev1.Value_IntegerValue{IntegerValue: 42}}},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+
+	stream, err := client.BatchGetDocuments(ctx, &firestorev1.BatchGetDocumentsRequest{
+		Database:  "projects/p/databases/(default)",
+		Documents: []string{docPath},
+		ConsistencySelector: &firestorev1.BatchGetDocumentsRequest_NewTransaction{
+			NewTransaction: &firestorev1.TransactionOptions{},
+		},
+	})
+	require.NoError(t, err)
+
+	// First response must be the transaction ID with no result.
+	first, err := stream.Recv()
+	require.NoError(t, err)
+	require.NotEmpty(t, first.GetTransaction(), "first response must contain a transaction ID")
+	assert.Nil(t, first.Result, "first response must have no document result")
+
+	txID := first.GetTransaction()
+
+	// Remaining responses carry documents.
+	var found []string
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		if f, ok := resp.Result.(*firestorev1.BatchGetDocumentsResponse_Found); ok {
+			found = append(found, f.Found.GetName())
+		}
+	}
+	assert.ElementsMatch(t, []string{docPath}, found)
+
+	// The transaction must be usable — Commit with the txID must succeed.
+	_, err = client.Commit(ctx, &firestorev1.CommitRequest{
+		Database:    "projects/p/databases/(default)",
+		Transaction: txID,
+	})
+	require.NoError(t, err)
+}
+
 func TestBatchWrite(t *testing.T) {
 	srv := startTestServer(t)
 	ctx := context.Background()

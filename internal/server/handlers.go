@@ -320,6 +320,80 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 	}, nil
 }
 
+// BatchGetDocuments fetches multiple documents in a single streaming RPC.
+// The Firebase SDK uses this to read documents inside runTransaction.
+// Supports three consistency modes:
+//   - existing transaction ID  → reads participate in that transaction
+//   - new_transaction          → server starts a transaction and returns its ID
+//   - no selector              → snapshot read outside any transaction
+func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRequest, stream firestorev1.Firestore_BatchGetDocumentsServer) error {
+	ctx := stream.Context()
+
+	// Resolve the transaction ID to use for reads.
+	txID := ""
+	switch cs := req.GetConsistencySelector().(type) {
+	case *firestorev1.BatchGetDocumentsRequest_Transaction:
+		txID = string(cs.Transaction)
+
+	case *firestorev1.BatchGetDocumentsRequest_NewTransaction:
+		readOnly := false
+		if ro := cs.NewTransaction.GetMode(); ro != nil {
+			_, readOnly = ro.(*firestorev1.TransactionOptions_ReadOnly_)
+		}
+		var err error
+		txID, err = s.db.BeginTransaction(ctx, readOnly)
+		if err != nil {
+			return err
+		}
+		// First response carries the new transaction ID so the client can later Commit/Rollback.
+		if err := stream.Send(&firestorev1.BatchGetDocumentsResponse{
+			Transaction: []byte(txID),
+			ReadTime:    timestamppb.Now(),
+		}); err != nil {
+			return err
+		}
+	}
+
+	readTime := timestamppb.Now()
+	for _, path := range req.GetDocuments() {
+		var resp *firestorev1.BatchGetDocumentsResponse
+
+		var sd *store.Document
+		var err error
+		if txID != "" {
+			sd, err = s.db.GetDocumentForTransaction(ctx, txID, path)
+		} else {
+			sd, err = s.db.GetDocument(ctx, path)
+		}
+
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				resp = &firestorev1.BatchGetDocumentsResponse{
+					Result:   &firestorev1.BatchGetDocumentsResponse_Missing{Missing: path},
+					ReadTime: readTime,
+				}
+			} else {
+				return err
+			}
+		} else {
+			proto, err := codec.StoreToProto(sd)
+			if err != nil {
+				return status.Errorf(codes.Internal, "decode document: %v", err)
+			}
+			resp = &firestorev1.BatchGetDocumentsResponse{
+				Result:   &firestorev1.BatchGetDocumentsResponse_Found{Found: proto},
+				ReadTime: readTime,
+			}
+		}
+
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // RunQuery executes a structured query against a collection.
 // Supports filters, ordering, and pagination via codec.QueryFromStructuredQuery
 // and s.db.QueryDocuments.
