@@ -91,6 +91,8 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 	wcMgr := webchannel.NewManager()
 	wcHandler := webchannel.NewHandler(wcMgr, fs.Listen)
 	mux.Handle("/google.firestore.v1.Firestore/Listen/channel", wcHandler)
+	wcWriteHandler := webchannel.NewWriteHandler(wcMgr, fs.Write)
+	mux.Handle("/google.firestore.v1.Firestore/Write/channel", wcWriteHandler)
 
 	// Intercept :runQuery before grpc-gateway. The Firebase lite SDK calls
 	// JSON.parse() on the full body and expects a JSON array, but grpc-gateway

@@ -504,3 +504,54 @@ func TestBatchWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.GetWriteResults(), 2)
 }
+
+// TestWrite_Stream verifies the Write bidirectional stream: handshake → write batch → write result.
+func TestWrite_Stream(t *testing.T) {
+	srv := startTestServer(t)
+	ctx := context.Background()
+	client := grpcClient(t, srv)
+
+	stream, err := client.Write(ctx)
+	require.NoError(t, err)
+
+	// Send handshake (empty writes).
+	err = stream.Send(&firestorev1.WriteRequest{
+		Database: "projects/p/databases/(default)",
+	})
+	require.NoError(t, err)
+
+	// Receive handshake response: must have stream_id, stream_token, no write_results.
+	handshake, err := stream.Recv()
+	require.NoError(t, err)
+	require.NotEmpty(t, handshake.GetStreamId(), "handshake must return a stream_id")
+	require.NotEmpty(t, handshake.GetStreamToken(), "handshake must return a stream_token")
+	assert.Empty(t, handshake.GetWriteResults(), "handshake response must have no write results")
+
+	// Send a write batch.
+	docPath := "projects/p/databases/(default)/documents/wstream/doc1"
+	err = stream.Send(&firestorev1.WriteRequest{
+		StreamId:    handshake.GetStreamId(),
+		StreamToken: handshake.GetStreamToken(),
+		Writes: []*firestorev1.Write{{
+			Operation: &firestorev1.Write_Update{Update: &firestorev1.Document{
+				Name:   docPath,
+				Fields: map[string]*firestorev1.Value{"v": {ValueType: &firestorev1.Value_StringValue{StringValue: "hello"}}},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+
+	// Receive write result.
+	result, err := stream.Recv()
+	require.NoError(t, err)
+	require.Len(t, result.GetWriteResults(), 1, "should get one WriteResult")
+	assert.NotNil(t, result.GetWriteResults()[0].GetUpdateTime(), "WriteResult must have update_time")
+
+	// Close the stream.
+	require.NoError(t, stream.CloseSend())
+
+	// Verify the document was actually persisted.
+	doc, err := client.GetDocument(ctx, &firestorev1.GetDocumentRequest{Name: docPath})
+	require.NoError(t, err)
+	assert.Equal(t, docPath, doc.GetName())
+}

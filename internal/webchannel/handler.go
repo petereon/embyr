@@ -182,6 +182,168 @@ func (h *Handler) handleBack(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ── Write BrowserChannel ────────────────────────────────────────────────────
+
+// writeBridge is a fake Firestore_WriteServer that routes between HTTP and the gRPC handler.
+type writeBridge struct {
+	ctx    context.Context
+	sendCh chan *firestorev1.WriteResponse
+	recvCh chan *firestorev1.WriteRequest
+}
+
+func newWriteBridge(ctx context.Context) *writeBridge {
+	return &writeBridge{
+		ctx:    ctx,
+		sendCh: make(chan *firestorev1.WriteResponse, 64),
+		recvCh: make(chan *firestorev1.WriteRequest, 8),
+	}
+}
+
+func (b *writeBridge) SetHeader(metadata.MD) error  { return nil }
+func (b *writeBridge) SendHeader(metadata.MD) error { return nil }
+func (b *writeBridge) SetTrailer(metadata.MD)        {}
+func (b *writeBridge) Context() context.Context      { return b.ctx }
+func (b *writeBridge) SendMsg(m any) error            { return nil }
+func (b *writeBridge) RecvMsg(m any) error            { return nil }
+
+func (b *writeBridge) Send(resp *firestorev1.WriteResponse) error {
+	select {
+	case b.sendCh <- resp:
+		return nil
+	case <-b.ctx.Done():
+		return b.ctx.Err()
+	}
+}
+
+func (b *writeBridge) Recv() (*firestorev1.WriteRequest, error) {
+	select {
+	case req := <-b.recvCh:
+		return req, nil
+	case <-b.ctx.Done():
+		return nil, io.EOF
+	}
+}
+
+// WriteHandler handles the Write BrowserChannel (POST forward + GET back).
+type WriteHandler struct {
+	mgr     *Manager
+	writeFn func(firestorev1.Firestore_WriteServer) error
+}
+
+// NewWriteHandler creates a WriteHandler.
+func NewWriteHandler(mgr *Manager, writeFn func(firestorev1.Firestore_WriteServer) error) *WriteHandler {
+	return &WriteHandler{mgr: mgr, writeFn: writeFn}
+}
+
+func (h *WriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		h.handleForward(w, r)
+	case http.MethodGet:
+		h.handleBack(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	sid := q.Get("SID")
+	rid := q.Get("RID")
+
+	if sid == "" && rid != "" {
+		sess := h.mgr.NewSession()
+		reqs, _ := parseWriteForwardBody(r)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		bridge := newWriteBridge(ctx)
+
+		sess.writeBridge = bridge
+		sess.cancel = cancel
+
+		go func() {
+			defer cancel()
+			defer h.mgr.Remove(sess.ID)
+			_ = h.writeFn(bridge)
+		}()
+
+		for _, req := range reqs {
+			select {
+			case bridge.recvCh <- req:
+			default:
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(sess.FormatConnectChunk())
+		return
+	}
+
+	sess := h.mgr.Get(sid)
+	if sess == nil {
+		http.Error(w, "session not found", http.StatusBadRequest)
+		return
+	}
+	reqs, _ := parseWriteForwardBody(r)
+	for _, req := range reqs {
+		select {
+		case sess.writeBridge.recvCh <- req:
+		default:
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
+	sid := r.URL.Query().Get("SID")
+	sess := h.mgr.Get(sid)
+	if sess == nil {
+		http.Error(w, "session not found", http.StatusBadRequest)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	keepAlive := time.NewTicker(25 * time.Second)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-sess.writeBridge.ctx.Done():
+			return
+		case resp, ok := <-sess.writeBridge.sendCh:
+			if !ok {
+				return
+			}
+			b, err := proto.Marshal(resp)
+			if err != nil {
+				continue
+			}
+			frame := EncodeGRPCWebFrame(b)
+			chunk := sess.FormatDataChunk(frame)
+			_, _ = w.Write(chunk)
+			flusher.Flush()
+		case <-keepAlive.C:
+			_, _ = w.Write(sess.FormatNoopChunk())
+			flusher.Flush()
+		}
+	}
+}
+
 // parseForwardBody decodes form-encoded BrowserChannel forward channel body.
 // Body format: count=N&ofs=M&req0___data__=<base64>&req1___data__=<base64>...
 func parseForwardBody(r *http.Request) ([]*firestorev1.ListenRequest, error) {
@@ -209,6 +371,40 @@ func parseForwardBody(r *http.Request) ([]*firestorev1.ListenRequest, error) {
 			continue
 		}
 		req := &firestorev1.ListenRequest{}
+		if err := proto.Unmarshal(protoBytes, req); err != nil {
+			continue
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs, nil
+}
+
+// parseWriteForwardBody is like parseForwardBody but decodes WriteRequest protos.
+func parseWriteForwardBody(r *http.Request) ([]*firestorev1.WriteRequest, error) {
+	if err := r.ParseForm(); err != nil {
+		return nil, err
+	}
+	count := 0
+	for k := range r.PostForm {
+		if strings.HasSuffix(k, "___data__") {
+			count++
+		}
+	}
+	reqs := make([]*firestorev1.WriteRequest, 0, count)
+	for i := 0; i < count; i++ {
+		encoded := r.FormValue(fmt.Sprintf("req%d___data__", i))
+		if encoded == "" {
+			continue
+		}
+		frameBytes, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			continue
+		}
+		protoBytes, err := DecodeGRPCWebFrame(frameBytes)
+		if err != nil {
+			continue
+		}
+		req := &firestorev1.WriteRequest{}
 		if err := proto.Unmarshal(protoBytes, req); err != nil {
 			continue
 		}

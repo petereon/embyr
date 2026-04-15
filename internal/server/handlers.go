@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -232,9 +234,22 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 		}, nil
 	}
 
-	results := make([]*firestorev1.WriteResult, 0, len(req.GetWrites()))
+	results, err := s.applyWriteBatch(ctx, req.GetWrites(), now)
+	if err != nil {
+		return nil, err
+	}
+	return &firestorev1.CommitResponse{
+		WriteResults: results,
+		CommitTime:   timestamppb.New(now),
+	}, nil
+}
 
-	for _, w := range req.GetWrites() {
+// applyWriteBatch applies a slice of writes (non-transactional) and returns
+// WriteResults. It is shared by Commit (non-transaction path) and Write stream.
+func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firestorev1.Write, now time.Time) ([]*firestorev1.WriteResult, error) {
+	results := make([]*firestorev1.WriteResult, 0, len(writes))
+
+	for _, w := range writes {
 		switch op := w.GetOperation().(type) {
 		case *firestorev1.Write_Update:
 			doc := op.Update
@@ -251,7 +266,6 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 			fields := doc.GetFields()
 			if len(transforms) > 0 {
 				var currFields map[string]*firestorev1.Value
-				// Only read current doc if transforms need it (non-REQUEST_TIME transforms).
 				needsRead := false
 				for _, t := range transforms {
 					switch t.GetTransformType().(type) {
@@ -267,7 +281,6 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 						currDoc, _ := codec.StoreToProto(curr)
 						currFields = currDoc.GetFields()
 					}
-					// If err == codes.NotFound, currFields stays nil (new document).
 				}
 				var transformErr error
 				fields, transformErr = applyFieldTransforms(fields, transforms, currFields, now)
@@ -313,11 +326,62 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 			return nil, status.Error(codes.Unimplemented, "write operation type not yet supported")
 		}
 	}
+	return results, nil
+}
 
-	return &firestorev1.CommitResponse{
-		WriteResults: results,
-		CommitTime:   timestamppb.New(now),
-	}, nil
+// Write implements the bidirectional Write stream used by the Firebase full SDK
+// for all mutation operations (addDoc, setDoc, updateDoc, deleteDoc, writeBatch).
+//
+// Protocol:
+//  1. Client sends handshake WriteRequest (empty writes, stream_id="").
+//  2. Server sends WriteResponse with stream_id + stream_token (no write results).
+//  3. Client sends WriteRequest batches; server applies writes and returns WriteResults.
+func (s *firestoreServer) Write(stream firestorev1.Firestore_WriteServer) error {
+	// Step 1: consume the handshake.
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+
+	// Step 2: send handshake response.
+	streamID := fmt.Sprintf("%016x", time.Now().UnixNano())
+	now := time.Now().UTC()
+	token := []byte(now.Format(time.RFC3339Nano))
+	if err := stream.Send(&firestorev1.WriteResponse{
+		StreamId:    streamID,
+		StreamToken: token,
+		CommitTime:  timestamppb.New(now),
+	}); err != nil {
+		return err
+	}
+
+	// Step 3: write loop.
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			if status.Code(err) == codes.Canceled {
+				return nil
+			}
+			return err
+		}
+
+		now = time.Now().UTC()
+		results, err := s.applyWriteBatch(stream.Context(), req.GetWrites(), now)
+		if err != nil {
+			return err
+		}
+		token = []byte(now.Format(time.RFC3339Nano))
+		if err := stream.Send(&firestorev1.WriteResponse{
+			StreamId:     streamID,
+			StreamToken:  token,
+			WriteResults: results,
+			CommitTime:   timestamppb.New(now),
+		}); err != nil {
+			return err
+		}
+	}
 }
 
 // BatchGetDocuments fetches multiple documents in a single streaming RPC.
