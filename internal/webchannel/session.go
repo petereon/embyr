@@ -1,6 +1,7 @@
 package webchannel
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -61,7 +62,10 @@ type Session struct {
 	ID     string
 	mgr    *Manager
 	seq    atomic.Int64 // next message sequence number
-	outbox chan []byte  // raw BrowserChannel chunks to write to the GET backchannel
+	outbox chan []byte   // raw BrowserChannel chunks to write to the GET backchannel
+	// set after session establishment by the HTTP handler
+	bridge *listenBridge
+	cancel context.CancelFunc
 }
 
 // Send enqueues a serialized BrowserChannel chunk for delivery to the client.

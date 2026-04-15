@@ -15,6 +15,7 @@ import (
 	"github.com/petereon/firstyr/internal/health"
 	"github.com/petereon/firstyr/internal/listen"
 	"github.com/petereon/firstyr/internal/store"
+	"github.com/petereon/firstyr/internal/webchannel"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"go.uber.org/zap"
@@ -86,6 +87,11 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.Healthz)
 	mux.HandleFunc("/readyz", h.Readyz)
+
+	wcMgr := webchannel.NewManager()
+	wcHandler := webchannel.NewHandler(wcMgr, fs.Listen)
+	mux.Handle("/google.firestore.v1.Firestore/Listen/channel", wcHandler)
+
 	// Intercept :runQuery before grpc-gateway. The Firebase lite SDK calls
 	// JSON.parse() on the full body and expects a JSON array, but grpc-gateway
 	// emits concatenated NDJSON objects {"result":{…}}. serveRunQuery collects
