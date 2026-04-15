@@ -144,26 +144,32 @@ func scanDoc(row interface {
 	}
 	var err error
 	if d.CreatedAt, err = time.Parse(time.RFC3339Nano, createdStr); err != nil {
-		if d.CreatedAt, err = time.Parse("2006-01-02T15:04:05.999999999-07:00", createdStr); err != nil {
-			d.CreatedAt = time.Now().UTC()
-		}
+		return nil, fmt.Errorf("sqlite: parse created_at %q: %w", createdStr, err)
 	}
 	if d.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedStr); err != nil {
-		if d.UpdatedAt, err = time.Parse("2006-01-02T15:04:05.999999999-07:00", updatedStr); err != nil {
-			d.UpdatedAt = time.Now().UTC()
-		}
+		return nil, fmt.Errorf("sqlite: parse updated_at %q: %w", updatedStr, err)
 	}
 	return &d, nil
 }
 
 // CreateDocument inserts a new document. Returns codes.AlreadyExists if path taken.
 func (a *Adapter) CreateDocument(ctx context.Context, doc *store.Document) (*store.Document, error) {
+	now := time.Now().UTC()
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = now
+	}
+	if doc.UpdatedAt.IsZero() {
+		doc.UpdatedAt = now
+	}
 	collection, parent := sqliteParseCollection(doc.Path)
-	now := doc.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	if collection == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "sqlite: invalid document path: %s", doc.Path)
+	}
+	updatedAt := doc.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	createdAt := doc.CreatedAt.UTC().Format(time.RFC3339Nano)
 
 	row := a.db.QueryRowContext(ctx, sqlInsertDoc,
-		doc.Path, collection, parent, doc.Data, createdAt, now)
+		doc.Path, collection, parent, doc.Data, createdAt, updatedAt)
 	d, err := scanDoc(row)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -189,11 +195,20 @@ func (a *Adapter) GetDocument(ctx context.Context, path string) (*store.Document
 
 // UpdateDocument writes doc according to mode.
 func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode store.WriteMode) (*store.Document, error) {
+	if doc.UpdatedAt.IsZero() {
+		doc.UpdatedAt = time.Now().UTC()
+	}
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = doc.UpdatedAt
+	}
 	now := doc.UpdatedAt.UTC().Format(time.RFC3339Nano)
 
 	switch mode {
 	case store.WriteModeUpsert:
 		collection, parent := sqliteParseCollection(doc.Path)
+		if collection == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "sqlite: invalid document path: %s", doc.Path)
+		}
 		createdAt := doc.CreatedAt.UTC().Format(time.RFC3339Nano)
 		row := a.db.QueryRowContext(ctx, sqlUpsertDoc,
 			doc.Path, collection, parent, doc.Data, createdAt, now)
@@ -216,6 +231,9 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 
 	case store.WriteModeInsertOnly:
 		collection, parent := sqliteParseCollection(doc.Path)
+		if collection == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "sqlite: invalid document path: %s", doc.Path)
+		}
 		createdAt := doc.CreatedAt.UTC().Format(time.RFC3339Nano)
 		row := a.db.QueryRowContext(ctx, sqlInsertDoc,
 			doc.Path, collection, parent, doc.Data, createdAt, now)
@@ -255,6 +273,7 @@ func (a *Adapter) ListDocuments(ctx context.Context, parent, collectionID string
 		pageSize = 100
 	}
 	offset := store.DecodePageToken(pageToken)
+	fetchSize := int(pageSize) + 1 // look-ahead: one extra to detect next page
 
 	var (
 		rows *sql.Rows
@@ -265,13 +284,13 @@ func (a *Adapter) ListDocuments(ctx context.Context, parent, collectionID string
 			`SELECT path, data, created_at, updated_at, version
              FROM documents WHERE parent = ?
              ORDER BY path ASC LIMIT ? OFFSET ?`,
-			parent, pageSize, offset)
+			parent, fetchSize, offset)
 	} else {
 		rows, err = a.db.QueryContext(ctx,
 			`SELECT path, data, created_at, updated_at, version
              FROM documents WHERE collection = ? AND parent = ?
              ORDER BY path ASC LIMIT ? OFFSET ?`,
-			collectionID, parent, pageSize, offset)
+			collectionID, parent, fetchSize, offset)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list documents: %w", err)
@@ -291,7 +310,8 @@ func (a *Adapter) ListDocuments(ctx context.Context, parent, collectionID string
 	}
 
 	var nextToken string
-	if int(pageSize) == len(docs) {
+	if len(docs) > int(pageSize) {
+		docs = docs[:pageSize]
 		nextToken = store.EncodePageToken(offset + int(pageSize))
 	}
 	return &store.ListPage{Documents: docs, NextPageToken: nextToken}, nil

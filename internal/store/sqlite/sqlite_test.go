@@ -233,3 +233,82 @@ func TestSQLiteAdapter_ListDocuments_Pagination(t *testing.T) {
 	assert.Len(t, page2.Documents, 2)
 	assert.Empty(t, page2.NextPageToken)
 }
+
+func TestSQLiteAdapter_ListDocuments_ExactPageBoundary(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	parent := "projects/p/databases/d/documents"
+	for i := 0; i < 6; i++ {
+		doc := &store.Document{
+			Path:      fmt.Sprintf("%s/exact/%d", parent, i),
+			Data:      "{}",
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+			Version:   1,
+		}
+		_, err := a.CreateDocument(ctx, doc)
+		require.NoError(t, err)
+	}
+
+	// 6 docs with pageSize=3: two full pages, no spurious third page
+	page1, err := a.ListDocuments(ctx, parent, "exact", 3, "")
+	require.NoError(t, err)
+	assert.Len(t, page1.Documents, 3)
+	assert.NotEmpty(t, page1.NextPageToken)
+
+	page2, err := a.ListDocuments(ctx, parent, "exact", 3, page1.NextPageToken)
+	require.NoError(t, err)
+	assert.Len(t, page2.Documents, 3)
+	assert.Empty(t, page2.NextPageToken, "exact multiple of pageSize must not emit a next token")
+}
+
+func TestSqliteParseCollection(t *testing.T) {
+	tests := []struct {
+		path       string
+		wantColl   string
+		wantParent string
+	}{
+		{
+			path:       "projects/p/databases/d/documents/users/alice",
+			wantColl:   "users",
+			wantParent: "projects/p/databases/d/documents",
+		},
+		{
+			path:       "projects/p/databases/d/documents/users/alice/orders/123",
+			wantColl:   "orders",
+			wantParent: "projects/p/databases/d/documents/users/alice",
+		},
+		{
+			path:       "no_documents_segment/foo/bar",
+			wantColl:   "",
+			wantParent: "",
+		},
+		{
+			path:       "projects/p/databases/d/documents/users",
+			wantColl:   "",
+			wantParent: "",
+		},
+	}
+	for _, tt := range tests {
+		coll, parent := sqliteParseCollection(tt.path)
+		assert.Equal(t, tt.wantColl, coll, "collection for %s", tt.path)
+		assert.Equal(t, tt.wantParent, parent, "parent for %s", tt.path)
+	}
+}
+
+func TestSQLiteAdapter_CreateDocument_InvalidPath(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	doc := &store.Document{
+		Path:      "not/a/valid/firestore/path",
+		Data:      "{}",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+	_, err := a.CreateDocument(ctx, doc)
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
