@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,10 +33,42 @@ type sqlExecer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// ctxTxKey is the context key used to pass a *sql.Tx through context.
+type ctxTxKey struct{}
+
+// txFromCtx extracts a *sql.Tx from the context, if present.
+func txFromCtx(ctx context.Context) sqlExecer {
+	if tx, ok := ctx.Value(ctxTxKey{}).(*sql.Tx); ok && tx != nil {
+		return tx
+	}
+	return nil
+}
+
+// execer returns the transaction from ctx if present, otherwise a.db.
+// This is the concurrency-safe alternative to mutating a.db on the shared struct.
+func (a *Adapter) execer(ctx context.Context) sqlExecer {
+	if tx := txFromCtx(ctx); tx != nil {
+		return tx
+	}
+	return a.db
+}
+
+// validFieldPath matches safe Firestore field path identifiers.
+var validFieldPath = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
+
+// validateFieldPath returns an InvalidArgument error if path contains
+// characters that could be used for SQL injection.
+func validateFieldPath(path string) error {
+	if !validFieldPath.MatchString(path) {
+		return status.Errorf(codes.InvalidArgument, "invalid field path: %q", path)
+	}
+	return nil
+}
+
 // Adapter implements store.StorageAdapter for SQLite.
 type Adapter struct {
 	rawDB          *sql.DB   // for Ping, Close, BeginTx, migrations
-	db             sqlExecer // for CRUD — swapped to *sql.Tx inside WithTransaction
+	db             sqlExecer // for CRUD (never mutated after construction)
 	migrationsPath string
 }
 
@@ -179,7 +212,7 @@ func (a *Adapter) CreateDocument(ctx context.Context, doc *store.Document) (*sto
 	updatedAt := doc.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	createdAt := doc.CreatedAt.UTC().Format(time.RFC3339Nano)
 
-	row := a.db.QueryRowContext(ctx, sqlInsertDoc,
+	row := a.execer(ctx).QueryRowContext(ctx, sqlInsertDoc,
 		doc.Path, collection, parent, doc.Data, createdAt, updatedAt)
 	d, err := scanDoc(row)
 	if err != nil {
@@ -193,7 +226,7 @@ func (a *Adapter) CreateDocument(ctx context.Context, doc *store.Document) (*sto
 
 // GetDocument fetches a document by path. Returns codes.NotFound if absent.
 func (a *Adapter) GetDocument(ctx context.Context, path string) (*store.Document, error) {
-	row := a.db.QueryRowContext(ctx, sqlGetDoc, path)
+	row := a.execer(ctx).QueryRowContext(ctx, sqlGetDoc, path)
 	d, err := scanDoc(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -221,7 +254,7 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 			return nil, status.Errorf(codes.InvalidArgument, "sqlite: invalid document path: %s", doc.Path)
 		}
 		createdAt := doc.CreatedAt.UTC().Format(time.RFC3339Nano)
-		row := a.db.QueryRowContext(ctx, sqlUpsertDoc,
+		row := a.execer(ctx).QueryRowContext(ctx, sqlUpsertDoc,
 			doc.Path, collection, parent, doc.Data, createdAt, now)
 		d, err := scanDoc(row)
 		if err != nil {
@@ -230,7 +263,7 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 		return d, nil
 
 	case store.WriteModeUpdate:
-		row := a.db.QueryRowContext(ctx, sqlUpdateDoc, doc.Data, now, doc.Path)
+		row := a.execer(ctx).QueryRowContext(ctx, sqlUpdateDoc, doc.Data, now, doc.Path)
 		d, err := scanDoc(row)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -246,7 +279,7 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 			return nil, status.Errorf(codes.InvalidArgument, "sqlite: invalid document path: %s", doc.Path)
 		}
 		createdAt := doc.CreatedAt.UTC().Format(time.RFC3339Nano)
-		row := a.db.QueryRowContext(ctx, sqlInsertDoc,
+		row := a.execer(ctx).QueryRowContext(ctx, sqlInsertDoc,
 			doc.Path, collection, parent, doc.Data, createdAt, now)
 		d, err := scanDoc(row)
 		if err != nil {
@@ -264,7 +297,7 @@ func (a *Adapter) UpdateDocument(ctx context.Context, doc *store.Document, mode 
 
 // DeleteDocument removes a document. Returns codes.NotFound if mustExist and absent.
 func (a *Adapter) DeleteDocument(ctx context.Context, path string, mustExist bool) error {
-	result, err := a.db.ExecContext(ctx, sqlDeleteDoc, path)
+	result, err := a.execer(ctx).ExecContext(ctx, sqlDeleteDoc, path)
 	if err != nil {
 		return fmt.Errorf("sqlite: delete document: %w", err)
 	}
@@ -291,13 +324,13 @@ func (a *Adapter) ListDocuments(ctx context.Context, parent, collectionID string
 		err  error
 	)
 	if collectionID == "" {
-		rows, err = a.db.QueryContext(ctx,
+		rows, err = a.execer(ctx).QueryContext(ctx,
 			`SELECT path, data, created_at, updated_at, version
              FROM documents WHERE parent = ?
              ORDER BY path ASC LIMIT ? OFFSET ?`,
 			parent, fetchSize, offset)
 	} else {
-		rows, err = a.db.QueryContext(ctx,
+		rows, err = a.execer(ctx).QueryContext(ctx,
 			`SELECT path, data, created_at, updated_at, version
              FROM documents WHERE collection = ? AND parent = ?
              ORDER BY path ASC LIMIT ? OFFSET ?`,
@@ -387,6 +420,9 @@ func sqliteScalarExpr(fieldPath string, fv store.FilterValue) (expr string, arg 
 
 // sqliteFilterClause builds a SQL WHERE clause fragment for a single FieldFilter.
 func sqliteFilterClause(f store.FieldFilter, args *[]interface{}) (string, error) {
+	if err := validateFieldPath(f.Field); err != nil {
+		return "", err
+	}
 	switch f.Op {
 	case store.FilterOpEqual, store.FilterOpNotEqual,
 		store.FilterOpLessThan, store.FilterOpLessThanOrEqual,
@@ -448,9 +484,15 @@ func sqliteFilterClause(f store.FieldFilter, args *[]interface{}) (string, error
 }
 
 // sqliteOrderExpr builds an ORDER BY expression for a single OrderBy clause.
-func sqliteOrderExpr(o store.OrderBy) string {
+func sqliteOrderExpr(o store.OrderBy) (string, error) {
+	if o.Direction != store.DirectionAsc && o.Direction != store.DirectionDesc {
+		return "", status.Errorf(codes.InvalidArgument, "invalid order direction: %q", o.Direction)
+	}
+	if err := validateFieldPath(o.Field); err != nil {
+		return "", err
+	}
 	base := sqliteFieldBase(o.Field)
-	return fmt.Sprintf("json_extract(data,'%s') %s", base, string(o.Direction))
+	return fmt.Sprintf("json_extract(data,'%s') %s", base, string(o.Direction)), nil
 }
 
 // QueryDocuments executes a structured query and returns matching documents.
@@ -490,7 +532,11 @@ func (a *Adapter) QueryDocuments(ctx context.Context, q *store.Query) (*store.Li
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(sqliteOrderExpr(o))
+			expr, err := sqliteOrderExpr(o)
+			if err != nil {
+				return nil, err
+			}
+			sb.WriteString(expr)
 		}
 	} else {
 		sb.WriteString(" ORDER BY path ASC")
@@ -498,7 +544,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, q *store.Query) (*store.Li
 
 	sb.WriteString(fmt.Sprintf(" LIMIT %d OFFSET %d", fetchSize, offset))
 
-	rows, err := a.db.QueryContext(ctx, sb.String(), args...)
+	rows, err := a.execer(ctx).QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: query documents: %w", err)
 	}
@@ -528,19 +574,18 @@ func (a *Adapter) QueryDocuments(ctx context.Context, q *store.Query) (*store.Li
 
 // WithTransaction executes fn inside a SQL transaction. If fn returns an error
 // the transaction is rolled back; otherwise it is committed.
+// The transaction is passed via context so that concurrent calls on the same
+// Adapter do not race on a shared field — each goroutine gets its own txCtx.
 func (a *Adapter) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
 	tx, err := a.rawDB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sqlite: begin tx: %w", err)
 	}
-	saved := a.db
-	a.db = tx
-	if err := fn(ctx); err != nil {
-		a.db = saved
+	txCtx := context.WithValue(ctx, ctxTxKey{}, tx)
+	if err := fn(txCtx); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	a.db = saved
 	return tx.Commit()
 }
 
@@ -552,11 +597,14 @@ func newTxID() string {
 }
 
 // BeginTransaction records a new Firestore transaction and returns its ID.
+// readOnly is recorded for future enforcement; writes are always permitted in plan 3.
 func (a *Adapter) BeginTransaction(ctx context.Context, readOnly bool) (string, error) {
+	_ = readOnly // reserved for future read-only enforcement
 	id := newTxID()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	expires := time.Now().UTC().Add(60 * time.Second).Format(time.RFC3339Nano)
-	_, err := a.db.ExecContext(ctx,
+	t := time.Now().UTC()
+	now := t.Format(time.RFC3339Nano)
+	expires := t.Add(60 * time.Second).Format(time.RFC3339Nano)
+	_, err := a.execer(ctx).ExecContext(ctx,
 		`INSERT INTO transactions (id, started_at, reads, expires_at) VALUES (?, ?, '{}', ?)`,
 		id, now, expires)
 	if err != nil {
@@ -572,7 +620,7 @@ func (a *Adapter) GetDocumentForTransaction(ctx context.Context, txID, path stri
 	if err != nil {
 		return nil, err
 	}
-	_, err = a.db.ExecContext(ctx,
+	_, err = a.execer(ctx).ExecContext(ctx,
 		`UPDATE transactions SET reads = json_set(reads, '$.' || ?, ?) WHERE id = ?`,
 		path, doc.Version, txID)
 	if err != nil {
@@ -658,6 +706,9 @@ func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []stor
                     INSERT INTO documents (path,collection,parent,data,created_at,updated_at,version)
                     VALUES (?,?,?,?,?,?,1)`,
 					d.Path, collection, parent, d.Data, crAt, updAt)
+			default:
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("sqlite: commit write: unknown write mode %d", op.Mode)
 			}
 			if execErr != nil {
 				_ = tx.Rollback()
@@ -687,13 +738,16 @@ func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []stor
 
 // RollbackTransaction deletes the transaction record without applying writes.
 func (a *Adapter) RollbackTransaction(ctx context.Context, txID string) error {
-	_, err := a.db.ExecContext(ctx, `DELETE FROM transactions WHERE id=?`, txID)
-	return err
+	_, err := a.execer(ctx).ExecContext(ctx, `DELETE FROM transactions WHERE id=?`, txID)
+	if err != nil {
+		return fmt.Errorf("sqlite: rollback transaction: %w", err)
+	}
+	return nil
 }
 
 // SweepExpiredTransactions deletes transaction records whose expires_at is in the past.
 func (a *Adapter) SweepExpiredTransactions(ctx context.Context) (int, error) {
-	result, err := a.db.ExecContext(ctx,
+	result, err := a.execer(ctx).ExecContext(ctx,
 		`DELETE FROM transactions WHERE expires_at < ?`,
 		time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
