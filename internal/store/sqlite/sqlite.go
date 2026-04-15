@@ -30,9 +30,16 @@ func New(path, migrationsPath string) (*Adapter, error) {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}
 	// WAL mode enables concurrent reads with writes and is required for listener hooks.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+	// SQLite PRAGMA returns the resulting mode — must verify it actually switched to wal,
+	// since a locked database may silently stay in the previous journal mode.
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode=WAL;").Scan(&mode); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("sqlite: enable WAL: %w", err)
+	}
+	if mode != "wal" {
+		db.Close()
+		return nil, fmt.Errorf("sqlite: enable WAL: got mode %q, want \"wal\"", mode)
 	}
 	return &Adapter{db: db, migrationsPath: migrationsPath}, nil
 }
