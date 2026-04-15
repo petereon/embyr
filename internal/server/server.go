@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+	"github.com/petereon/firstyr/internal/auth"
 	"github.com/petereon/firstyr/internal/config"
 	"github.com/petereon/firstyr/internal/health"
 	"github.com/petereon/firstyr/internal/store"
@@ -19,12 +21,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// firestoreServer is the gRPC service implementation.
-// All RPCs return UNIMPLEMENTED until Plans 2-4 fill them in.
-type firestoreServer struct {
-	firestorev1.UnimplementedFirestoreServer
-}
-
 // Server wraps the gRPC server and the grpc-gateway REST mux.
 type Server struct {
 	cfg        *config.Config
@@ -36,11 +32,21 @@ type Server struct {
 
 // New creates a Server wired to db. It does not start listening.
 func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server, error) {
-	grpcSrv := grpc.NewServer(
-		grpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
-		grpc.StreamInterceptor(loggingStreamInterceptor(log)),
-	)
-	firestorev1.RegisterFirestoreServer(grpcSrv, &firestoreServer{})
+	authCfg, err := auth.New(cfg, log)
+	if err != nil {
+		return nil, fmt.Errorf("server: auth: %w", err)
+	}
+
+	opts := []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(authCfg.Unary, loggingUnaryInterceptor(log)),
+		grpc.ChainStreamInterceptor(authCfg.Stream, loggingStreamInterceptor(log)),
+	}
+	if authCfg.Creds != nil {
+		opts = append(opts, grpc.Creds(authCfg.Creds))
+	}
+
+	grpcSrv := grpc.NewServer(opts...)
+	firestorev1.RegisterFirestoreServer(grpcSrv, &firestoreServer{db: db, log: log})
 	reflection.Register(grpcSrv)
 
 	gwMux := runtime.NewServeMux()
@@ -91,7 +97,9 @@ func (s *Server) Run(ctx context.Context) error {
 	eg.Go(func() error {
 		<-egCtx.Done()
 		s.grpcServer.GracefulStop()
-		return restSrv.Shutdown(context.Background())
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return restSrv.Shutdown(shutCtx)
 	})
 	return eg.Wait()
 }
