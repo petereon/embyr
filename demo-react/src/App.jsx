@@ -140,15 +140,24 @@ export default function App() {
   }
 
   // ── runTransaction ────────────────────────────────────────────────────────
+  // One-time boost: reads the document to check the `boosted` flag, then
+  // conditionally writes. The read gates the write — this is what makes a
+  // transaction necessary here rather than a plain updateDoc.
   async function handleBoost(id) {
     const ref = doc(db, COLL, id);
     try {
+      let alreadyBoosted = false;
       await runTransaction(db, async tx => {
         const snap = await tx.get(ref);
         if (!snap.exists()) throw new Error('Document was deleted');
-        tx.update(ref, { votes: (snap.data().votes || 0) + 10 });
+        if (snap.data().boosted) { alreadyBoosted = true; return; }
+        tx.update(ref, { votes: (snap.data().votes || 0) + 10, boosted: true });
       });
-      logOp('runTransaction  — read → votes + 10 (atomic)');
+      if (alreadyBoosted) {
+        setError('Already boosted — runTransaction read the flag and aborted the write.');
+      } else {
+        logOp('runTransaction  — read boosted flag → +10 votes, set boosted:true');
+      }
     } catch (err) {
       setError(err.message);
     }
@@ -280,7 +289,13 @@ export default function App() {
 
               {/* Actions */}
               <div className="note-actions">
-                <button className="btn-boost" onClick={() => handleBoost(note.id)} title="runTransaction: atomic +10">⚡+10</button>
+                <button
+                  className={`btn-boost${note.boosted ? ' boosted' : ''}`}
+                  onClick={() => handleBoost(note.id)}
+                  title={note.boosted ? 'Already boosted (transaction will abort)' : 'runTransaction: read boosted flag → +10 if not yet boosted'}
+                >
+                  {note.boosted ? '⚡done' : '⚡+10'}
+                </button>
                 <button className="btn-delete" onClick={() => handleDelete(note.id)} aria-label="Delete">×</button>
               </div>
             </li>

@@ -307,6 +307,7 @@ h1 { font-size: 1.4rem; font-weight: 700; }
   white-space: nowrap;
 }
 .btn-boost:hover { background: #fef08a; }
+.btn-boost.boosted { background: #f1f5f9; color: #94a3b8; border-color: #e2e8f0; cursor: default; }
 .btn-delete {
   align-self: flex-end;
   background: none;
