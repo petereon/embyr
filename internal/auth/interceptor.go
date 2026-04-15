@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/petereon/firstyr/internal/config"
 	"go.uber.org/zap"
@@ -21,11 +23,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// tokenInfoURL is the Google tokeninfo endpoint. Overridable in tests via SetTokenInfoURL.
-var tokenInfoURL = "https://www.googleapis.com/oauth2/v1/tokeninfo"
+var tokenInfoURLAtomic atomic.Value
+
+func init() {
+	tokenInfoURLAtomic.Store("https://www.googleapis.com/oauth2/v1/tokeninfo")
+}
 
 // SetTokenInfoURL overrides the Google tokeninfo endpoint. For testing only.
-func SetTokenInfoURL(url string) { tokenInfoURL = url }
+func SetTokenInfoURL(url string) { tokenInfoURLAtomic.Store(url) }
+
+func getTokenInfoURL() string { return tokenInfoURLAtomic.Load().(string) }
 
 // Config holds the auth interceptors and optional TLS credentials for the gRPC server.
 type Config struct {
@@ -114,7 +121,7 @@ func validateKey(ctx context.Context, expectedKey string) error {
 	if err != nil {
 		return err
 	}
-	if token != expectedKey {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(expectedKey)) != 1 {
 		return status.Error(codes.Unauthenticated, "invalid API key")
 	}
 	return nil
@@ -145,15 +152,26 @@ func validateGoogleToken(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.Get(tokenInfoURL + "?id_token=" + token) //nolint:noctx
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		getTokenInfoURL()+"?id_token="+token, nil)
+	if err != nil {
+		return status.Errorf(codes.Internal, "google token request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return status.Errorf(codes.Unauthenticated, "google token validation: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		resp.Body.Close()             //nolint:errcheck
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return status.Error(codes.Unauthenticated, "invalid google token")
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return status.Errorf(codes.Internal, "google token read body: %v", err)
+	}
 	var info struct {
 		Audience string `json:"audience"`
 		AZP      string `json:"azp"`
