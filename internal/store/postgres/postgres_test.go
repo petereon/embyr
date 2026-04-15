@@ -330,6 +330,28 @@ func TestBeginCommitTransaction(t *testing.T) {
 	require.Equal(t, codes.Aborted, status.Code(err))
 }
 
+func TestSubscribe_ReceivesChange(t *testing.T) {
+	// Requires a live PostgreSQL instance. Skip if DSN not set.
+	a := newTestAdapter(t)
+	ch, cancel := a.Subscribe()
+	defer cancel()
+
+	ctx := context.Background()
+	_, err := a.CreateDocument(ctx, &store.Document{
+		Path: "projects/p/databases/d/documents/sub/test1",
+		Data: `{"fields":{"x":{"integerValue":"1"}}}`,
+	})
+	require.NoError(t, err)
+
+	select {
+	case change := <-ch:
+		require.Equal(t, "projects/p/databases/d/documents/sub/test1", change.Path)
+		require.Equal(t, store.DocChangeUpsert, change.Kind)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for change notification")
+	}
+}
+
 func TestPostgresAdapter_ListDocuments_ExactPageBoundary(t *testing.T) {
 	a := newTestAdapter(t)
 	ctx := context.Background()

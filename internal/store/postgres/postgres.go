@@ -15,6 +15,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	migratepostgres "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -70,6 +71,7 @@ type Adapter struct {
 	rawDB          *sql.DB   // for Ping, Close, BeginTx, migrations
 	db             sqlExecer // for CRUD (never mutated after construction)
 	migrationsPath string
+	dsn            string // stored for pgx raw conn in Subscribe
 }
 
 // New opens a connection pool to the PostgreSQL database at dsn and returns a ready Adapter.
@@ -82,7 +84,7 @@ func New(dsn, migrationsPath string, maxConns int) (*Adapter, error) {
 	if maxConns > 0 {
 		db.SetMaxOpenConns(maxConns)
 	}
-	return &Adapter{rawDB: db, db: db, migrationsPath: migrationsPath}, nil
+	return &Adapter{rawDB: db, db: db, migrationsPath: migrationsPath, dsn: dsn}, nil
 }
 
 // Ping verifies the database connection is alive.
@@ -727,4 +729,64 @@ func (a *Adapter) SweepExpiredTransactions(ctx context.Context) (int, error) {
 	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
+}
+
+// Subscribe opens a dedicated pgx connection, issues LISTEN doc_changes, and
+// returns a channel that receives a DocChange for every committed document
+// write. The returned cancel function tears down the listener and closes the
+// channel. Subscribe is safe to call concurrently; each call opens its own
+// connection.
+func (a *Adapter) Subscribe() (<-chan store.DocChange, func()) {
+	ch := make(chan store.DocChange, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		defer close(ch)
+		conn, err := pgx.Connect(ctx, a.dsn)
+		if err != nil {
+			return
+		}
+		defer conn.Close(ctx)
+
+		if _, err := conn.Exec(ctx, "LISTEN doc_changes"); err != nil {
+			return
+		}
+
+		for {
+			notif, err := conn.WaitForNotification(ctx)
+			if err != nil {
+				return // context cancelled or connection lost
+			}
+			var payload struct {
+				Path       string `json:"path"`
+				Collection string `json:"collection"`
+				Parent     string `json:"parent"`
+				Kind       string `json:"kind"`
+				Version    int64  `json:"version"`
+				Data       string `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(notif.Payload), &payload); err != nil {
+				continue
+			}
+			kind := store.DocChangeUpsert
+			if payload.Kind == "delete" {
+				kind = store.DocChangeDelete
+			}
+			c := store.DocChange{
+				Path:       payload.Path,
+				Collection: payload.Collection,
+				Parent:     payload.Parent,
+				Kind:       kind,
+				Version:    payload.Version,
+				Data:       payload.Data,
+			}
+			select {
+			case ch <- c:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ch, cancel
 }
