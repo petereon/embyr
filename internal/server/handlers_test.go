@@ -354,3 +354,43 @@ func TestCommit_ServerTimestamp(t *testing.T) {
 	require.True(t, ok, "createdAt field should have been set by serverTimestamp")
 	require.NotNil(t, doc.Fields["createdAt"].GetTimestampValue(), "createdAt should be a timestamp")
 }
+
+func TestBeginRollback(t *testing.T) {
+	srv := startTestServer(t)
+	ctx := context.Background()
+	client := grpcClient(t, srv)
+
+	beginResp, err := client.BeginTransaction(ctx, &firestorev1.BeginTransactionRequest{
+		Database: "projects/p/databases/(default)",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, beginResp.GetTransaction())
+
+	_, err = client.Rollback(ctx, &firestorev1.RollbackRequest{
+		Database:    "projects/p/databases/(default)",
+		Transaction: beginResp.GetTransaction(),
+	})
+	require.NoError(t, err)
+}
+
+func TestBatchWrite(t *testing.T) {
+	srv := startTestServer(t)
+	ctx := context.Background()
+	client := grpcClient(t, srv)
+
+	resp, err := client.BatchWrite(ctx, &firestorev1.BatchWriteRequest{
+		Database: "projects/p/databases/(default)",
+		Writes: []*firestorev1.Write{
+			{Operation: &firestorev1.Write_Update{Update: &firestorev1.Document{
+				Name:   "projects/p/databases/(default)/documents/batch/a",
+				Fields: map[string]*firestorev1.Value{"x": {ValueType: &firestorev1.Value_IntegerValue{IntegerValue: 1}}},
+			}}},
+			{Operation: &firestorev1.Write_Update{Update: &firestorev1.Document{
+				Name:   "projects/p/databases/(default)/documents/batch/b",
+				Fields: map[string]*firestorev1.Value{"x": {ValueType: &firestorev1.Value_IntegerValue{IntegerValue: 2}}},
+			}}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.GetWriteResults(), 2)
+}

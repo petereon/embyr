@@ -193,6 +193,43 @@ func (s *firestoreServer) ListDocuments(ctx context.Context, req *firestorev1.Li
 // Supports update (upsert) and delete writes. Field transforms are not yet implemented.
 func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitRequest) (*firestorev1.CommitResponse, error) {
 	now := time.Now().UTC()
+
+	// If a transaction ID is provided, delegate to CommitTransaction for OCC.
+	if txBytes := req.GetTransaction(); len(txBytes) > 0 {
+		txID := string(txBytes)
+		ops := make([]store.WriteOp, 0, len(req.GetWrites()))
+		for _, w := range req.GetWrites() {
+			switch op := w.GetOperation().(type) {
+			case *firestorev1.Write_Update:
+				mode := store.WriteModeUpsert
+				if mask := w.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
+					mode = store.WriteModeUpdate
+				}
+				sd, err := codec.ProtoToStore(op.Update)
+				if err != nil {
+					return nil, status.Errorf(codes.Internal, "encode document: %v", err)
+				}
+				ops = append(ops, store.WriteOp{Type: store.WriteOpUpdate, Doc: sd, Mode: mode})
+			case *firestorev1.Write_Delete:
+				ops = append(ops, store.WriteOp{Type: store.WriteOpDelete, Path: op.Delete})
+			default:
+				return nil, status.Error(codes.Unimplemented, "write operation type not supported in transaction commit")
+			}
+		}
+		result, err := s.db.CommitTransaction(ctx, txID, ops)
+		if err != nil {
+			return nil, err
+		}
+		wrs := make([]*firestorev1.WriteResult, len(result.WriteResults))
+		for i, wr := range result.WriteResults {
+			wrs[i] = &firestorev1.WriteResult{UpdateTime: timestamppb.New(wr.UpdatedAt)}
+		}
+		return &firestorev1.CommitResponse{
+			WriteResults: wrs,
+			CommitTime:   timestamppb.New(result.CommitTime),
+		}, nil
+	}
+
 	results := make([]*firestorev1.WriteResult, 0, len(req.GetWrites()))
 
 	for _, w := range req.GetWrites() {
