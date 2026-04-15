@@ -756,6 +756,7 @@ func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []stor
 
 	// Apply writes.
 	results := make([]store.WriteResult, 0, len(ops))
+	var changes []store.DocChange
 	for _, op := range ops {
 		switch op.Type {
 		case store.WriteOpUpdate:
@@ -797,6 +798,13 @@ func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []stor
 				return nil, fmt.Errorf("sqlite: commit write: %w", execErr)
 			}
 			results = append(results, store.WriteResult{UpdatedAt: now})
+			changes = append(changes, store.DocChange{
+				Path:       d.Path,
+				Collection: collection,
+				Parent:     parent,
+				Kind:       store.DocChangeUpsert,
+				Data:       d.Data,
+			})
 
 		case store.WriteOpDelete:
 			if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE path=?`, op.Path); err != nil {
@@ -804,6 +812,13 @@ func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []stor
 				return nil, fmt.Errorf("sqlite: commit delete: %w", err)
 			}
 			results = append(results, store.WriteResult{UpdatedAt: now})
+			collection, parent := sqliteParseCollection(op.Path)
+			changes = append(changes, store.DocChange{
+				Path:       op.Path,
+				Collection: collection,
+				Parent:     parent,
+				Kind:       store.DocChangeDelete,
+			})
 
 		default:
 			_ = tx.Rollback()
@@ -819,6 +834,11 @@ func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []stor
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("sqlite: commit transaction tx: %w", err)
 	}
+
+	for _, c := range changes {
+		a.notifySubscribers(c)
+	}
+
 	return &store.CommitResult{WriteResults: results, CommitTime: now}, nil
 }
 

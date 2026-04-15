@@ -41,7 +41,7 @@ BEGIN
         END IF;
     END IF;
     PERFORM pg_notify('doc_changes', payload);
-    RETURN NEW;
+    RETURN COALESCE(NEW, OLD);
 END;
 $$ LANGUAGE plpgsql;
 

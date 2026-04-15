@@ -94,6 +94,9 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithCancel(context.Background())
 		bridge := newListenBridge(ctx)
 
+		sess.bridge = bridge
+		sess.cancel = cancel
+
 		go func() {
 			defer cancel()
 			defer h.mgr.Remove(sess.ID)
@@ -106,9 +109,6 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 		}
-
-		sess.bridge = bridge
-		sess.cancel = cancel
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
