@@ -248,6 +248,41 @@ func (a *Adapter) DeleteDocument(ctx context.Context, path string, mustExist boo
 	return nil
 }
 
+// QueryDocuments is not yet implemented for PostgreSQL (Task 5).
+func (a *Adapter) QueryDocuments(ctx context.Context, q *store.Query) (*store.ListPage, error) {
+	return nil, status.Errorf(codes.Unimplemented, "postgres: QueryDocuments not yet implemented")
+}
+
+// WithTransaction is not yet implemented for PostgreSQL (Task 5).
+func (a *Adapter) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return status.Errorf(codes.Unimplemented, "postgres: WithTransaction not yet implemented")
+}
+
+// BeginTransaction is not yet implemented for PostgreSQL (Task 5).
+func (a *Adapter) BeginTransaction(ctx context.Context, readOnly bool) (string, error) {
+	return "", status.Errorf(codes.Unimplemented, "postgres: BeginTransaction not yet implemented")
+}
+
+// GetDocumentForTransaction is not yet implemented for PostgreSQL (Task 5).
+func (a *Adapter) GetDocumentForTransaction(ctx context.Context, txID, path string) (*store.Document, error) {
+	return nil, status.Errorf(codes.Unimplemented, "postgres: GetDocumentForTransaction not yet implemented")
+}
+
+// CommitTransaction is not yet implemented for PostgreSQL (Task 5).
+func (a *Adapter) CommitTransaction(ctx context.Context, txID string, ops []store.WriteOp) (*store.CommitResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "postgres: CommitTransaction not yet implemented")
+}
+
+// RollbackTransaction is not yet implemented for PostgreSQL (Task 5).
+func (a *Adapter) RollbackTransaction(ctx context.Context, txID string) error {
+	return status.Errorf(codes.Unimplemented, "postgres: RollbackTransaction not yet implemented")
+}
+
+// SweepExpiredTransactions is not yet implemented for PostgreSQL (Task 5).
+func (a *Adapter) SweepExpiredTransactions(ctx context.Context) (int, error) {
+	return 0, status.Errorf(codes.Unimplemented, "postgres: SweepExpiredTransactions not yet implemented")
+}
+
 // ListDocuments returns documents in a collection, paginated by offset.
 func (a *Adapter) ListDocuments(ctx context.Context, parent, collectionID string, pageSize int32, pageToken string) (*store.ListPage, error) {
 	if pageSize <= 0 {

@@ -312,3 +312,95 @@ func TestSQLiteAdapter_CreateDocument_InvalidPath(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
+
+func mustCreate(t *testing.T, a store.StorageAdapter, path, data string) *store.Document {
+	t.Helper()
+	d, err := a.CreateDocument(context.Background(), &store.Document{Path: path, Data: data})
+	require.NoError(t, err)
+	return d
+}
+
+func TestQueryDocuments_StringFilter(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	mustCreate(t, a, "projects/p/databases/d/documents/items/a",
+		`{"fields":{"status":{"stringValue":"active"},"name":{"stringValue":"alpha"}}}`)
+	mustCreate(t, a, "projects/p/databases/d/documents/items/b",
+		`{"fields":{"status":{"stringValue":"inactive"},"name":{"stringValue":"beta"}}}`)
+	mustCreate(t, a, "projects/p/databases/d/documents/items/c",
+		`{"fields":{"status":{"stringValue":"active"},"name":{"stringValue":"gamma"}}}`)
+
+	q := &store.Query{
+		Parent:       "projects/p/databases/d/documents",
+		CollectionID: "items",
+		Filter: &store.CompositeFilter{Filters: []store.FieldFilter{
+			{Field: "status", Op: store.FilterOpEqual,
+				Value: store.FilterValue{Kind: store.FilterValueString, StrVal: "active"}},
+		}},
+		PageSize: 100,
+	}
+	page, err := a.QueryDocuments(ctx, q)
+	require.NoError(t, err)
+	require.Len(t, page.Documents, 2)
+}
+
+func TestQueryDocuments_IntFilter(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	mustCreate(t, a, "projects/p/databases/d/documents/things/x",
+		`{"fields":{"score":{"integerValue":"10"}}}`)
+	mustCreate(t, a, "projects/p/databases/d/documents/things/y",
+		`{"fields":{"score":{"integerValue":"20"}}}`)
+	mustCreate(t, a, "projects/p/databases/d/documents/things/z",
+		`{"fields":{"score":{"integerValue":"5"}}}`)
+
+	q := &store.Query{
+		Parent:       "projects/p/databases/d/documents",
+		CollectionID: "things",
+		Filter: &store.CompositeFilter{Filters: []store.FieldFilter{
+			{Field: "score", Op: store.FilterOpGreaterThan,
+				Value: store.FilterValue{Kind: store.FilterValueInt, IntVal: 9}},
+		}},
+		OrderBy:  []store.OrderBy{{Field: "score", Direction: store.DirectionAsc}},
+		PageSize: 100,
+	}
+	page, err := a.QueryDocuments(ctx, q)
+	require.NoError(t, err)
+	require.Len(t, page.Documents, 2)
+}
+
+func TestBeginCommitTransaction(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	mustCreate(t, a, "projects/p/databases/d/documents/col/doc1",
+		`{"fields":{"val":{"integerValue":"1"}}}`)
+
+	txID, err := a.BeginTransaction(ctx, false)
+	require.NoError(t, err)
+	require.NotEmpty(t, txID)
+
+	doc, err := a.GetDocumentForTransaction(ctx, txID, "projects/p/databases/d/documents/col/doc1")
+	require.NoError(t, err)
+	require.NotNil(t, doc)
+
+	// Update the document outside the transaction — should cause Aborted
+	_, err = a.UpdateDocument(ctx, &store.Document{
+		Path: "projects/p/databases/d/documents/col/doc1",
+		Data: `{"fields":{"val":{"integerValue":"99"}}}`,
+	}, store.WriteModeUpdate)
+	require.NoError(t, err)
+
+	// Commit should be aborted because the read version no longer matches
+	newDoc := &store.Document{
+		Path: "projects/p/databases/d/documents/col/doc1",
+		Data: `{"fields":{"val":{"integerValue":"2"}}}`,
+	}
+	_, err = a.CommitTransaction(ctx, txID, []store.WriteOp{
+		{Type: store.WriteOpUpdate, Doc: newDoc, Mode: store.WriteModeUpdate},
+	})
+	require.Error(t, err)
+	require.Equal(t, codes.Aborted, status.Code(err))
+}
