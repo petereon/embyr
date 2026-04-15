@@ -95,8 +95,14 @@ func (s *firestoreServer) UpdateDocument(ctx context.Context, req *firestorev1.U
 	if mask := req.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
 		curr, err := s.db.GetDocument(ctx, doc.GetName())
 		if err != nil {
-			if status.Code(err) == codes.NotFound && writeMode == store.WriteModeUpsert {
-				// Document doesn't exist yet; use the provided fields as-is.
+			if status.Code(err) == codes.NotFound &&
+				(writeMode == store.WriteModeUpsert || writeMode == store.WriteModeInsertOnly) {
+				// Document absent; use the provided fields as-is.
+				// For WriteModeUpsert: create it. For WriteModeInsertOnly: create it (precondition satisfied).
+				//
+				// NOTE: WriteModeUpsert retains upsert semantics here, not InsertOnly. If another writer
+				// creates the document between this GetDocument and the UpdateDocument call below, the upsert
+				// will silently overwrite it. Plan 3 will add optimistic locking to close this race window.
 			} else {
 				return nil, err
 			}
@@ -174,6 +180,9 @@ func (s *firestoreServer) ListDocuments(ctx context.Context, req *firestorev1.Li
 // Only top-level field paths are supported in Plan 2.
 func applyMask(current, incoming map[string]*firestorev1.Value, maskPaths []string) map[string]*firestorev1.Value {
 	result := make(map[string]*firestorev1.Value, len(current))
+	// NOTE: Value pointers from current are copied by reference, not deep-cloned.
+	// This is safe because neither the adapter nor codec mutates Value nodes after creation.
+	// Plan 3 must deep-clone here if a document cache with shared Value nodes is introduced.
 	for k, v := range current {
 		result[k] = v
 	}

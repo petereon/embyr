@@ -38,8 +38,8 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 	}
 
 	opts := []grpc.ServerOption{
-		grpc.ChainUnaryInterceptor(authCfg.Unary, loggingUnaryInterceptor(log)),
-		grpc.ChainStreamInterceptor(authCfg.Stream, loggingStreamInterceptor(log)),
+		grpc.ChainUnaryInterceptor(loggingUnaryInterceptor(log), authCfg.Unary),
+		grpc.ChainStreamInterceptor(loggingStreamInterceptor(log), authCfg.Stream),
 	}
 	if authCfg.Creds != nil {
 		opts = append(opts, grpc.Creds(authCfg.Creds))
