@@ -46,7 +46,8 @@ func startTestServer(t *testing.T) *testServer {
 	cfg.Server.RESTPort = restPort
 	cfg.Auth.Mode = "none"
 
-	log, _ := zap.NewDevelopment()
+	log, err := zap.NewDevelopment()
+	require.NoError(t, err)
 	srv, err := server.New(cfg, adapter, log)
 	require.NoError(t, err)
 
@@ -55,11 +56,17 @@ func startTestServer(t *testing.T) *testServer {
 		cancel()
 		adapter.Close()
 	})
-	go srv.Run(ctx) //nolint:errcheck
+	runErr := make(chan error, 1)
+	go func() { runErr <- srv.Run(ctx) }()
 
 	// Wait for server to be ready.
 	restBase := fmt.Sprintf("http://127.0.0.1:%d", restPort)
 	require.Eventually(t, func() bool {
+		select {
+		case err := <-runErr:
+			t.Fatalf("server exited unexpectedly: %v", err)
+		default:
+		}
 		resp, err := http.Get(restBase + "/healthz")
 		if err != nil {
 			return false
@@ -127,7 +134,8 @@ func TestRPC_CreateAndGetDocument(t *testing.T) {
 	docs, ok := result["documents"].([]interface{})
 	require.True(t, ok, "listing users collection must return a 'documents' array; got: %v", result)
 	require.Len(t, docs, 1, "exactly one document should be in the collection")
-	doc := docs[0].(map[string]interface{})
+	doc, ok2 := docs[0].(map[string]interface{})
+	require.True(t, ok2, "expected document object, got: %T", docs[0])
 	assert.Equal(t, name, doc["name"], "listed document name must match the created document name")
 
 	// Verify via direct gRPC GetDocument call.
