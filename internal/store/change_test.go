@@ -17,4 +17,6 @@ func TestDocChange_Fields(t *testing.T) {
 	}
 	require.Equal(t, "col", c.Collection)
 	require.Equal(t, store.DocChangeUpsert, c.Kind)
+	require.EqualValues(t, 1, store.DocChangeDelete)
+	require.Equal(t, int64(3), c.Version)
 }
