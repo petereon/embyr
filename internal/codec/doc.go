@@ -51,7 +51,7 @@ func ParsePath(path string) (collection, parent string) {
 		return "", ""
 	}
 	relative := parts[docsIdx+1:]
-	if len(relative) < 2 {
+	if len(relative) < 2 || len(relative)%2 != 0 {
 		return "", ""
 	}
 	collection = relative[len(relative)-2]
@@ -84,14 +84,11 @@ func ProtoToStore(doc *firestorev1.Document) (*store.Document, error) {
 		return nil, fmt.Errorf("codec: marshal fields: %w", err)
 	}
 	data := string(b)
-	if data == "" {
-		data = "{}"
-	}
 
 	now := time.Now().UTC()
 	createdAt := now
-	if doc.GetCreateTime() != nil {
-		createdAt = doc.GetCreateTime().AsTime().UTC()
+	if ct := doc.GetCreateTime(); ct != nil && ct.IsValid() {
+		createdAt = ct.AsTime().UTC()
 	}
 
 	return &store.Document{

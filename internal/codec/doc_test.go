@@ -28,6 +28,11 @@ func TestParsePath(t *testing.T) {
 			wantColl:   "orders",
 			wantParent: "projects/p/databases/d/documents/users/alice",
 		},
+		{
+			path:       "projects/p/databases/d/documents/users/alice/orders",
+			wantColl:   "",
+			wantParent: "",
+		},
 	}
 	for _, tt := range tests {
 		coll, parent := codec.ParsePath(tt.path)
@@ -68,6 +73,8 @@ func TestProtoToStoreRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, proto.Name, sd.Path)
 	assert.NotEmpty(t, sd.Data)
+	assert.Equal(t, int64(1), sd.Version)
+	assert.Equal(t, now.Unix(), sd.CreatedAt.Unix())
 
 	back, err := codec.StoreToProto(sd)
 	require.NoError(t, err)
@@ -82,6 +89,30 @@ func TestStoreToProto_EmptyData(t *testing.T) {
 	sd := &store.Document{
 		Path:      "projects/p/databases/d/documents/col/doc",
 		Data:      "{}",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+	doc, err := codec.StoreToProto(sd)
+	require.NoError(t, err)
+	assert.Equal(t, sd.Path, doc.Name)
+	assert.Empty(t, doc.Fields)
+}
+
+func TestProtoToStore_ZeroCreateTime(t *testing.T) {
+	doc := &firestorev1.Document{
+		Name:       "projects/p/databases/d/documents/col/doc",
+		CreateTime: &timestamppb.Timestamp{}, // zero value: seconds=0, nanos=0
+	}
+	sd, err := codec.ProtoToStore(doc)
+	require.NoError(t, err)
+	assert.True(t, sd.CreatedAt.Year() > 1, "zero CreateTime must not propagate; got %v", sd.CreatedAt)
+}
+
+func TestStoreToProto_EmptyStringData(t *testing.T) {
+	sd := &store.Document{
+		Path:      "projects/p/databases/d/documents/col/doc",
+		Data:      "",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 		Version:   1,
