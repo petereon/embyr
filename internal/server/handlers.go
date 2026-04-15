@@ -8,6 +8,7 @@ import (
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
 	"github.com/petereon/firstyr/internal/codec"
+	"github.com/petereon/firstyr/internal/listen"
 	"github.com/petereon/firstyr/internal/store"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -22,8 +23,9 @@ import (
 // firestoreServer is the gRPC service implementation.
 type firestoreServer struct {
 	firestorev1.UnimplementedFirestoreServer
-	db  store.StorageAdapter
-	log *zap.Logger
+	db       store.StorageAdapter
+	log      *zap.Logger
+	registry *listen.Registry
 }
 
 // GetDocument fetches a single document by its resource name.

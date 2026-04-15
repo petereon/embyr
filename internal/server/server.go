@@ -13,6 +13,7 @@ import (
 	"github.com/petereon/firstyr/internal/auth"
 	"github.com/petereon/firstyr/internal/config"
 	"github.com/petereon/firstyr/internal/health"
+	"github.com/petereon/firstyr/internal/listen"
 	"github.com/petereon/firstyr/internal/store"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
@@ -53,7 +54,16 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 	}
 
 	grpcSrv := grpc.NewServer(opts...)
-	fs := &firestoreServer{db: db, log: log}
+	reg := listen.NewRegistry()
+	fs := &firestoreServer{db: db, log: log, registry: reg}
+	// Start feeding the registry from the adapter's Subscribe channel.
+	go func() {
+		ch, cancel := db.Subscribe()
+		defer cancel()
+		for c := range ch {
+			reg.Dispatch(c)
+		}
+	}()
 	firestorev1.RegisterFirestoreServer(grpcSrv, fs)
 	reflection.Register(grpcSrv)
 
