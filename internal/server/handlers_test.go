@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,4 +252,70 @@ func TestRPC_ListDocuments(t *testing.T) {
 	docs, ok := result["documents"].([]interface{})
 	require.True(t, ok, "response must have 'documents' array; got: %v", result)
 	assert.Len(t, docs, 3)
+}
+
+// createDoc is a helper that creates a document via the CreateDocument REST endpoint.
+func createDoc(t *testing.T, base, parent, collectionID string, body map[string]interface{}) string {
+	t.Helper()
+	url := fmt.Sprintf("%s/v1/%s/%s", base, parent, collectionID)
+	jsonBody, err := json.Marshal(body)
+	require.NoError(t, err)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonBody))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	name, ok := result["name"].(string)
+	require.True(t, ok, "response must have a 'name' field")
+	return name
+}
+
+// TestRunQuery_WithFilter creates two documents with different status values,
+// then queries with a filter and verifies only the matching document is returned.
+func TestRunQuery_WithFilter(t *testing.T) {
+	srv := startTestServer(t)
+	restBase := srv.restBase
+
+	// Create documents — two "active", one "inactive"
+	createDoc(t, restBase, "projects/p/databases/(default)/documents", "items", map[string]interface{}{
+		"fields": map[string]interface{}{"status": map[string]interface{}{"stringValue": "active"}},
+	})
+	createDoc(t, restBase, "projects/p/databases/(default)/documents", "items", map[string]interface{}{
+		"fields": map[string]interface{}{"status": map[string]interface{}{"stringValue": "active"}},
+	})
+	createDoc(t, restBase, "projects/p/databases/(default)/documents", "items", map[string]interface{}{
+		"fields": map[string]interface{}{"status": map[string]interface{}{"stringValue": "inactive"}},
+	})
+
+	// Run filtered query via POST :runQuery
+	body := `{
+        "structuredQuery": {
+            "from": [{"collectionId": "items"}],
+            "where": {
+                "fieldFilter": {
+                    "field": {"fieldPath": "status"},
+                    "op": "EQUAL",
+                    "value": {"stringValue": "active"}
+                }
+            }
+        }
+    }`
+	resp, err := http.Post(
+		restBase+"/v1/projects/p/databases/(default)/documents:runQuery",
+		"application/json", strings.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var results []map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&results))
+	// Filter out the terminal {"done":true} entry
+	docs := 0
+	for _, r := range results {
+		if r["document"] != nil {
+			docs++
+		}
+	}
+	require.Equal(t, 2, docs, "expected 2 active documents")
 }

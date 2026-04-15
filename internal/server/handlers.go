@@ -2,15 +2,20 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"strings"
+	"time"
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
 	"github.com/petereon/firstyr/internal/codec"
 	"github.com/petereon/firstyr/internal/store"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // firestoreServer is the gRPC service implementation.
@@ -182,6 +187,159 @@ func (s *firestoreServer) ListDocuments(ctx context.Context, req *firestorev1.Li
 		NextPageToken: page.NextPageToken,
 	}, nil
 }
+
+// Commit applies a list of writes atomically.
+// Supports update (upsert) and delete writes. Field transforms are not yet implemented.
+func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitRequest) (*firestorev1.CommitResponse, error) {
+	now := time.Now().UTC()
+	results := make([]*firestorev1.WriteResult, 0, len(req.GetWrites()))
+
+	for _, w := range req.GetWrites() {
+		switch op := w.GetOperation().(type) {
+		case *firestorev1.Write_Update:
+			doc := op.Update
+			if doc.GetName() == "" {
+				return nil, status.Error(codes.InvalidArgument, "write.update.name is required")
+			}
+			mode := store.WriteModeUpsert
+			if mask := w.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
+				mode = store.WriteModeUpdate
+			}
+			sd, err := codec.ProtoToStore(doc)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "encode document: %v", err)
+			}
+			result, err := s.db.UpdateDocument(ctx, sd, mode)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, &firestorev1.WriteResult{
+				UpdateTime: timestamppb.New(result.UpdatedAt),
+			})
+
+		case *firestorev1.Write_Delete:
+			if op.Delete == "" {
+				return nil, status.Error(codes.InvalidArgument, "write.delete path is required")
+			}
+			mustExist := false
+			if pre := w.GetCurrentDocument(); pre != nil {
+				switch c := pre.GetConditionType().(type) {
+				case *firestorev1.Precondition_Exists:
+					mustExist = c.Exists
+				case *firestorev1.Precondition_UpdateTime:
+					mustExist = true
+				}
+			}
+			if err := s.db.DeleteDocument(ctx, op.Delete, mustExist); err != nil {
+				return nil, err
+			}
+			results = append(results, &firestorev1.WriteResult{
+				UpdateTime: timestamppb.New(now),
+			})
+
+		default:
+			return nil, status.Error(codes.Unimplemented, "write operation type not yet supported")
+		}
+	}
+
+	return &firestorev1.CommitResponse{
+		WriteResults: results,
+		CommitTime:   timestamppb.New(now),
+	}, nil
+}
+
+// RunQuery executes a structured query against a collection.
+// Supports filters, ordering, and pagination via codec.QueryFromStructuredQuery
+// and s.db.QueryDocuments.
+func (s *firestoreServer) RunQuery(req *firestorev1.RunQueryRequest, stream firestorev1.Firestore_RunQueryServer) error {
+	ctx := stream.Context()
+
+	sq := req.GetStructuredQuery()
+	if sq == nil {
+		return status.Error(codes.InvalidArgument, "structured_query is required")
+	}
+	froms := sq.GetFrom()
+	if len(froms) == 0 {
+		return status.Error(codes.InvalidArgument, "structured_query.from is required")
+	}
+
+	parent := req.GetParent()
+	pageSize := int32(300)
+	if lim := sq.GetLimit(); lim != nil && lim.GetValue() > 0 {
+		pageSize = lim.GetValue()
+	}
+
+	q, err := codec.QueryFromStructuredQuery(parent, sq, pageSize, "")
+	if err != nil {
+		return err
+	}
+
+	readTime := timestamppb.Now()
+	pageToken := ""
+	for {
+		q.PageToken = pageToken
+		page, err := s.db.QueryDocuments(ctx, q)
+		if err != nil {
+			return err
+		}
+		for _, sd := range page.Documents {
+			proto, err := codec.StoreToProto(sd)
+			if err != nil {
+				return status.Errorf(codes.Internal, "decode document: %v", err)
+			}
+			if err := stream.Send(&firestorev1.RunQueryResponse{
+				Document: proto,
+				ReadTime: readTime,
+			}); err != nil {
+				return err
+			}
+		}
+		if page.NextPageToken == "" || q.Limit > 0 {
+			break
+		}
+		pageToken = page.NextPageToken
+	}
+
+	return stream.Send(&firestorev1.RunQueryResponse{
+		ContinuationSelector: &firestorev1.RunQueryResponse_Done{Done: true},
+		ReadTime:             readTime,
+	})
+}
+
+// runQueryStreamer implements Firestore_RunQueryServer by writing each response
+// directly to an http.ResponseWriter as a streaming JSON array, matching real
+// Firestore REST behaviour: `[` is written before the first item, `,` is
+// inserted between items, and the caller closes the array with `]`.
+// http.Flusher.Flush() is called after each item so bytes reach the client
+// as soon as each document is ready rather than at the end of the query.
+type runQueryStreamer struct {
+	ctx     context.Context
+	w       http.ResponseWriter
+	flusher http.Flusher
+	marshal protojson.MarshalOptions
+	started bool // true once the opening `[` has been written
+}
+
+func (s *runQueryStreamer) Send(r *firestorev1.RunQueryResponse) error {
+	if !s.started {
+		s.w.Write([]byte("["))
+		s.started = true
+	} else {
+		s.w.Write([]byte(","))
+	}
+	b, _ := s.marshal.Marshal(r)
+	s.w.Write(b)
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+	return nil
+}
+func (s *runQueryStreamer) SetHeader(md metadata.MD) error  { return nil }
+func (s *runQueryStreamer) SendHeader(md metadata.MD) error { return nil }
+func (s *runQueryStreamer) SetTrailer(metadata.MD)          {}
+func (s *runQueryStreamer) Context() context.Context        { return s.ctx }
+func (s *runQueryStreamer) SendMsg(m any) error             { return nil }
+func (s *runQueryStreamer) RecvMsg(m any) error             { return nil }
 
 // applyMask merges incoming fields into current fields, honouring the field mask.
 // Fields listed in maskPaths are replaced by the incoming value (or removed if
