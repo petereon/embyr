@@ -30,3 +30,30 @@ type ListPage struct {
 	Documents     []*Document
 	NextPageToken string // empty string = last page
 }
+
+// WriteOpType identifies the kind of write in a WriteOp.
+type WriteOpType int8
+
+const (
+	WriteOpUpdate WriteOpType = iota // create or update
+	WriteOpDelete                    // delete the document
+)
+
+// WriteOp is a single write operation for batch/transaction commits.
+type WriteOp struct {
+	Type WriteOpType
+	Doc  *Document // set for WriteOpUpdate; Doc.Path is the document path
+	Path string    // set for WriteOpDelete; the full Firestore document path
+	Mode WriteMode // ignored for WriteOpDelete
+}
+
+// WriteResult is the per-write result returned by CommitTransaction and BatchWrite.
+type WriteResult struct {
+	UpdatedAt time.Time
+}
+
+// CommitResult holds the results of a CommitTransaction call.
+type CommitResult struct {
+	WriteResults []WriteResult
+	CommitTime   time.Time
+}

@@ -45,4 +45,28 @@ type StorageAdapter interface {
 	// pageSize=0 uses a server default of 100.
 	// pageToken="" starts from the first page.
 	ListDocuments(ctx context.Context, parent, collectionID string, pageSize int32, pageToken string) (*ListPage, error)
+
+	// QueryDocuments returns documents matching q. Filters, ordering, and cursors
+	// are applied; results are paginated using q.PageSize and q.PageToken.
+	QueryDocuments(ctx context.Context, q *Query) (*ListPage, error)
+
+	// WithTransaction executes fn inside a SQL transaction.
+	// If fn returns an error the transaction is rolled back; otherwise committed.
+	WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error
+
+	// BeginTransaction records a new Firestore transaction and returns its ID.
+	BeginTransaction(ctx context.Context, readOnly bool) (txID string, err error)
+
+	// GetDocumentForTransaction fetches a document and records the read in the
+	// transaction's read set for OCC validation at commit.
+	GetDocumentForTransaction(ctx context.Context, txID, path string) (*Document, error)
+
+	// CommitTransaction verifies OCC, applies ops atomically, deletes transaction record.
+	CommitTransaction(ctx context.Context, txID string, ops []WriteOp) (*CommitResult, error)
+
+	// RollbackTransaction deletes the transaction record without applying writes.
+	RollbackTransaction(ctx context.Context, txID string) error
+
+	// SweepExpiredTransactions deletes transaction records whose expires_at is in the past.
+	SweepExpiredTransactions(ctx context.Context) (deleted int, err error)
 }
