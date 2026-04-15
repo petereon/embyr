@@ -126,16 +126,145 @@ func TestPostgresAdapter_ListDocuments(t *testing.T) {
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	parent := "projects/p/databases/d/documents"
+	coll := "pgusers_" + suffix
 	for _, id := range []string{"a_" + suffix, "b_" + suffix} {
 		doc := &store.Document{
-			Path: parent + "/pgusers/" + id, Data: "{}",
+			Path: fmt.Sprintf("%s/%s/%s", parent, coll, id), Data: "{}",
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Version: 1,
 		}
 		_, err := a.CreateDocument(ctx, doc)
 		require.NoError(t, err)
 	}
 
-	page, err := a.ListDocuments(ctx, parent, "pgusers", 10, "")
+	page, err := a.ListDocuments(ctx, parent, coll, 10, "")
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(page.Documents), 2)
+	assert.Len(t, page.Documents, 2)
+}
+
+func TestPostgresAdapter_UpdateDocument_MustExist_NotFound(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	path := fmt.Sprintf("projects/p/databases/d/documents/col/%d", time.Now().UnixNano())
+	doc := &store.Document{
+		Path:      path,
+		Data:      "{}",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+	_, err := a.UpdateDocument(ctx, doc, store.WriteModeUpdate)
+	require.Error(t, err)
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+func TestPostgresAdapter_UpdateDocument_InsertOnly_AlreadyExists(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	path := fmt.Sprintf("projects/p/databases/d/documents/col/%d", time.Now().UnixNano())
+	doc := &store.Document{
+		Path:      path,
+		Data:      "{}",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+	_, err := a.CreateDocument(ctx, doc)
+	require.NoError(t, err)
+
+	_, err = a.UpdateDocument(ctx, doc, store.WriteModeInsertOnly)
+	require.Error(t, err)
+	assert.Equal(t, codes.AlreadyExists, status.Code(err))
+}
+
+func TestPostgresAdapter_DeleteDocument(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	path := fmt.Sprintf("projects/p/databases/d/documents/col/%d", time.Now().UnixNano())
+	doc := &store.Document{
+		Path:      path,
+		Data:      "{}",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+	_, err := a.CreateDocument(ctx, doc)
+	require.NoError(t, err)
+
+	err = a.DeleteDocument(ctx, path, true)
+	require.NoError(t, err)
+
+	_, err = a.GetDocument(ctx, path)
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+func TestPostgresAdapter_DeleteDocument_MustExist_NotFound(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	path := fmt.Sprintf("projects/p/databases/d/documents/col/%d_missing", time.Now().UnixNano())
+	err := a.DeleteDocument(ctx, path, true)
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+func TestPostgresAdapter_ListDocuments_Pagination(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	parent := "projects/p/databases/d/documents"
+	coll := "pgitems_" + suffix
+	for i := 0; i < 5; i++ {
+		doc := &store.Document{
+			Path:      fmt.Sprintf("%s/%s/%d", parent, coll, i),
+			Data:      "{}",
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+			Version:   1,
+		}
+		_, err := a.CreateDocument(ctx, doc)
+		require.NoError(t, err)
+	}
+
+	page1, err := a.ListDocuments(ctx, parent, coll, 3, "")
+	require.NoError(t, err)
+	assert.Len(t, page1.Documents, 3)
+	assert.NotEmpty(t, page1.NextPageToken)
+
+	page2, err := a.ListDocuments(ctx, parent, coll, 3, page1.NextPageToken)
+	require.NoError(t, err)
+	assert.Len(t, page2.Documents, 2)
+	assert.Empty(t, page2.NextPageToken)
+}
+
+func TestPostgresAdapter_ListDocuments_ExactPageBoundary(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	parent := "projects/p/databases/d/documents"
+	coll := "pgexact_" + suffix
+	for i := 0; i < 6; i++ {
+		doc := &store.Document{
+			Path:      fmt.Sprintf("%s/%s/%d", parent, coll, i),
+			Data:      "{}",
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+			Version:   1,
+		}
+		_, err := a.CreateDocument(ctx, doc)
+		require.NoError(t, err)
+	}
+
+	page1, err := a.ListDocuments(ctx, parent, coll, 3, "")
+	require.NoError(t, err)
+	assert.Len(t, page1.Documents, 3)
+	assert.NotEmpty(t, page1.NextPageToken)
+
+	page2, err := a.ListDocuments(ctx, parent, coll, 3, page1.NextPageToken)
+	require.NoError(t, err)
+	assert.Len(t, page2.Documents, 3)
+	assert.Empty(t, page2.NextPageToken, "exact multiple of pageSize must not emit a next token")
 }
