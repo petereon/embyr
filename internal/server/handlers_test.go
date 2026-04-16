@@ -373,6 +373,55 @@ func TestBeginRollback(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestBatchGetDocuments_REST_JSONArray verifies that POST …:batchGet returns
+// a JSON array, not NDJSON. The Firebase SDK calls .forEach() on the full
+// response body, so it must be parseable as a JSON array.
+func TestBatchGetDocuments_REST_JSONArray(t *testing.T) {
+	srv := startTestServer(t)
+
+	// Create one document; request it plus a missing one.
+	docA := "projects/p/databases/(default)/documents/bg/a"
+	createDoc(t, srv.restBase, "projects/p/databases/(default)/documents", "bg", map[string]interface{}{
+		"fields": map[string]interface{}{"x": map[string]interface{}{"stringValue": "hello"}},
+	})
+	// Use the exact name returned from createDoc for the assertion
+	result := listCollection(t, srv.restBase, "p", "(default)", "bg")
+	docs := result["documents"].([]interface{})
+	require.Len(t, docs, 1)
+	docA = docs[0].(map[string]interface{})["name"].(string)
+
+	docMissing := "projects/p/databases/(default)/documents/bg/ghost"
+	body := fmt.Sprintf(`{"documents":[%q,%q]}`, docA, docMissing)
+	resp, err := http.Post(
+		srv.restBase+"/v1/projects/p/databases/(default)/documents:batchGet",
+		"application/json",
+		strings.NewReader(body),
+	)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	// Must be a JSON array (not NDJSON) for the Firebase SDK .forEach() call.
+	var arr []map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &arr), "response must be a JSON array, got: %s", string(raw))
+	require.Len(t, arr, 2)
+
+	var found, missing int
+	for _, item := range arr {
+		if _, ok := item["found"]; ok {
+			found++
+		}
+		if _, ok := item["missing"]; ok {
+			missing++
+		}
+	}
+	assert.Equal(t, 1, found, "expected 1 found document")
+	assert.Equal(t, 1, missing, "expected 1 missing document")
+}
+
 // TestBatchGetDocuments_FoundAndMissing creates two documents, then calls
 // BatchGetDocuments asking for those two plus a nonexistent document.
 // It verifies that found docs are returned as Found results and the missing

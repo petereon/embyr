@@ -458,6 +458,72 @@ func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRe
 	return nil
 }
 
+// batchGetStreamer implements Firestore_BatchGetDocumentsServer by collecting
+// all responses into a JSON array, matching the real Firestore REST behaviour.
+// The Firebase SDK calls i.forEach() on the result, so the whole array must be
+// returned at once — unlike RunQuery, BatchGetDocuments is not streamed incrementally.
+type batchGetStreamer struct {
+	ctx     context.Context
+	buf     []*firestorev1.BatchGetDocumentsResponse
+	marshal protojson.MarshalOptions
+}
+
+func (s *batchGetStreamer) Send(r *firestorev1.BatchGetDocumentsResponse) error {
+	s.buf = append(s.buf, r)
+	return nil
+}
+func (s *batchGetStreamer) SetHeader(md metadata.MD) error  { return nil }
+func (s *batchGetStreamer) SendHeader(md metadata.MD) error { return nil }
+func (s *batchGetStreamer) SetTrailer(metadata.MD)          {}
+func (s *batchGetStreamer) Context() context.Context        { return s.ctx }
+func (s *batchGetStreamer) SendMsg(m any) error             { return nil }
+func (s *batchGetStreamer) RecvMsg(m any) error             { return nil }
+
+// serveBatchGetDocuments intercepts POST …:batchGet and returns a JSON array.
+// grpc-gateway emits NDJSON for server-streaming RPCs, but the Firebase SDK
+// calls .forEach() on the full response body, so it must be a JSON array.
+func serveBatchGetDocuments(w http.ResponseWriter, r *http.Request, fs *firestoreServer) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// URL: /v1/projects/p/databases/(default)/documents:batchGet
+	// Extract database = "projects/p/databases/(default)"
+	stripped := strings.TrimPrefix(r.URL.Path, "/v1/")
+	database := strings.TrimSuffix(stripped, "/documents:batchGet")
+
+	req := &firestorev1.BatchGetDocumentsRequest{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(body, req); err != nil {
+		http.Error(w, "decode request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Database = database
+
+	streamer := &batchGetStreamer{
+		ctx:     r.Context(),
+		marshal: protojson.MarshalOptions{EmitUnpopulated: false},
+	}
+
+	if rpcErr := fs.BatchGetDocuments(req, streamer); rpcErr != nil {
+		code := status.Code(rpcErr)
+		http.Error(w, rpcErr.Error(), grpcCodeToHTTP(code))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte("["))
+	for i, resp := range streamer.buf {
+		if i > 0 {
+			w.Write([]byte(","))
+		}
+		b, _ := streamer.marshal.Marshal(resp)
+		w.Write(b)
+	}
+	w.Write([]byte("]"))
+}
+
 // RunQuery executes a structured query against a collection.
 // Supports filters, ordering, and pagination via codec.QueryFromStructuredQuery
 // and s.db.QueryDocuments.

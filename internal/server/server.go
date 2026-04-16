@@ -103,6 +103,10 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 			serveRunQuery(w, r, fs)
 			return
 		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchGet") {
+			serveBatchGetDocuments(w, r, fs)
+			return
+		}
 		gwMux.ServeHTTP(w, r)
 	}))
 
