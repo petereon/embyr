@@ -18,11 +18,12 @@ import (
 func (s *firestoreServer) Listen(stream firestorev1.Firestore_ListenServer) error {
 	ctx := stream.Context()
 
-	// Map of target_id → collectionInfo for filtering incoming changes.
+	// Map of target_id → per-target query descriptor.
 	type targetInfo struct {
 		parent       string
 		collectionID string
 		targetID     int32
+		query        *store.Query // full structured query including filters/ordering/limit
 	}
 	targets := make(map[int32]targetInfo)
 
@@ -64,12 +65,8 @@ func (s *firestoreServer) Listen(stream firestorev1.Firestore_ListenServer) erro
 			return err
 		}
 
-		// Stream current documents.
-		q := &store.Query{
-			Parent:       ti.parent,
-			CollectionID: ti.collectionID,
-			PageSize:     300,
-		}
+		// Stream current documents using the full query (includes filters, ordering, limit).
+		q := ti.query
 		readTime := time.Now().UTC()
 		for {
 			page, err := s.db.QueryDocuments(ctx, q)
@@ -92,10 +89,18 @@ func (s *firestoreServer) Listen(stream firestorev1.Firestore_ListenServer) erro
 					return err
 				}
 			}
-			if page.NextPageToken == "" {
+			if page.NextPageToken == "" || q.Limit > 0 {
 				break
 			}
-			q.PageToken = page.NextPageToken
+			q = &store.Query{
+				Parent:       q.Parent,
+				CollectionID: q.CollectionID,
+				Filter:       q.Filter,
+				OrderBy:      q.OrderBy,
+				Limit:        q.Limit,
+				PageSize:     q.PageSize,
+				PageToken:    page.NextPageToken,
+			}
 		}
 
 		// Signal snapshot complete.
@@ -133,10 +138,15 @@ func (s *firestoreServer) Listen(stream firestorev1.Firestore_ListenServer) erro
 				if sq == nil || len(sq.GetFrom()) == 0 {
 					return status.Error(codes.InvalidArgument, "structured_query.from is required")
 				}
+				q, err := codec.QueryFromStructuredQuery(qt.GetParent(), sq, 300, "")
+				if err != nil {
+					return err
+				}
 				ti := targetInfo{
 					parent:       qt.GetParent(),
 					collectionID: sq.GetFrom()[0].GetCollectionId(),
 					targetID:     t.GetTargetId(),
+					query:        q,
 				}
 				targets[ti.targetID] = ti
 				if err := deliverSnapshot(ti); err != nil {
@@ -151,12 +161,14 @@ func (s *firestoreServer) Listen(stream firestorev1.Firestore_ListenServer) erro
 			}
 
 		case change := <-changeCh:
-			// Fan out to every target that matches this change's collection + parent.
+			// Fan out to every target whose collection matches the change.
 			for _, ti := range targets {
 				if ti.parent != change.Parent || ti.collectionID != change.Collection {
 					continue
 				}
 				if change.Kind == store.DocChangeDelete {
+					// Always deliver deletions — the client will ignore the event
+					// if the document was not in its local result set.
 					if err := stream.Send(&firestorev1.ListenResponse{
 						ResponseType: &firestorev1.ListenResponse_DocumentDelete{
 							DocumentDelete: &firestorev1.DocumentDelete{
@@ -181,6 +193,10 @@ func (s *firestoreServer) Listen(stream firestorev1.Firestore_ListenServer) erro
 					if err != nil {
 						return status.Errorf(codes.Internal, "decode document: %v", err)
 					}
+					// Only forward the change if the document satisfies the target's filter.
+					if !codec.MatchesFilter(proto, ti.query.Filter) {
+						continue
+					}
 					if err := stream.Send(&firestorev1.ListenResponse{
 						ResponseType: &firestorev1.ListenResponse_DocumentChange{
 							DocumentChange: &firestorev1.DocumentChange{
@@ -192,7 +208,7 @@ func (s *firestoreServer) Listen(stream firestorev1.Firestore_ListenServer) erro
 						return err
 					}
 				}
-				// Send a NO_CHANGE resume token after each change batch.
+				// Send a NO_CHANGE resume token after each delivered change.
 				if err := sendTargetChange(firestorev1.TargetChange_NO_CHANGE, nil,
 					listen.EncodeResumeToken(time.Now().UTC())); err != nil {
 					return err

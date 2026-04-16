@@ -216,6 +216,10 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 				ops = append(ops, store.WriteOp{Type: store.WriteOpUpdate, Doc: sd, Mode: mode})
 			case *firestorev1.Write_Delete:
 				ops = append(ops, store.WriteOp{Type: store.WriteOpDelete, Path: op.Delete})
+			case nil:
+				// VerifyMutation: no operation, only a currentDocument precondition.
+				// OCC is enforced by CommitTransaction via the transaction's read set.
+				// Nothing to add to ops — just skip.
 			default:
 				return nil, status.Error(codes.Unimplemented, "write operation type not supported in transaction commit")
 			}
@@ -259,6 +263,20 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 			mode := store.WriteModeUpsert
 			if mask := w.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
 				mode = store.WriteModeUpdate
+			}
+			// Apply currentDocument precondition for the update operation.
+			if pre := w.GetCurrentDocument(); pre != nil {
+				switch c := pre.GetConditionType().(type) {
+				case *firestorev1.Precondition_Exists:
+					if c.Exists {
+						mode = store.WriteModeUpdate
+					} else {
+						mode = store.WriteModeInsertOnly
+					}
+				case *firestorev1.Precondition_UpdateTime:
+					_ = c // treat update_time precondition as "must exist"
+					mode = store.WriteModeUpdate
+				}
 			}
 
 			// Apply field transforms if present.
@@ -321,6 +339,10 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 			results = append(results, &firestorev1.WriteResult{
 				UpdateTime: timestamppb.New(now),
 			})
+
+		case nil:
+			// VerifyMutation: no operation, only a currentDocument precondition.
+			// In the non-transaction path this is a no-op; skip silently.
 
 		default:
 			return nil, status.Error(codes.Unimplemented, "write operation type not yet supported")

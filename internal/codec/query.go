@@ -1,6 +1,8 @@
 package codec
 
 import (
+	"math"
+
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
 	"github.com/petereon/firstyr/internal/store"
 	"google.golang.org/grpc/codes"
@@ -167,4 +169,163 @@ func protoCursor(c *firestorev1.Cursor, orders []store.OrderBy, isEnd bool) *sto
 		Before: c.GetBefore(),
 		IsEnd:  isEnd,
 	}
+}
+
+// MatchesFilter reports whether doc satisfies the composite filter.
+// Returns true when filter is nil (no filter ⇒ all documents match).
+// Used by the Listen stream to decide which live-change notifications to
+// forward to a given target without a round-trip back to the storage layer.
+func MatchesFilter(doc *firestorev1.Document, f *store.CompositeFilter) bool {
+	if f == nil {
+		return true
+	}
+	for _, ff := range f.Filters {
+		if !matchFieldFilter(doc.GetFields(), ff) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchFieldFilter(fields map[string]*firestorev1.Value, ff store.FieldFilter) bool {
+	v, ok := fields[ff.Field]
+
+	// Field is absent.
+	if !ok {
+		switch ff.Op {
+		case store.FilterOpNotEqual, store.FilterOpNotIn:
+			return true
+		default:
+			return false
+		}
+	}
+
+	docVal := FilterValueFromProto(v)
+	switch ff.Op {
+	case store.FilterOpEqual:
+		return filterValuesEqual(docVal, ff.Value)
+	case store.FilterOpNotEqual:
+		return !filterValuesEqual(docVal, ff.Value)
+	case store.FilterOpLessThan:
+		return filterValuesCmp(docVal, ff.Value) < 0
+	case store.FilterOpLessThanOrEqual:
+		return filterValuesCmp(docVal, ff.Value) <= 0
+	case store.FilterOpGreaterThan:
+		return filterValuesCmp(docVal, ff.Value) > 0
+	case store.FilterOpGreaterThanOrEqual:
+		return filterValuesCmp(docVal, ff.Value) >= 0
+	case store.FilterOpIn:
+		for _, candidate := range ff.Value.ArrayVals {
+			if filterValuesEqual(docVal, candidate) {
+				return true
+			}
+		}
+		return false
+	case store.FilterOpNotIn:
+		for _, candidate := range ff.Value.ArrayVals {
+			if filterValuesEqual(docVal, candidate) {
+				return false
+			}
+		}
+		return true
+	case store.FilterOpArrayContains:
+		if docVal.Kind != store.FilterValueArray {
+			return false
+		}
+		for _, el := range docVal.ArrayVals {
+			if filterValuesEqual(el, ff.Value) {
+				return true
+			}
+		}
+		return false
+	case store.FilterOpArrayContainsAny:
+		if docVal.Kind != store.FilterValueArray {
+			return false
+		}
+		for _, el := range docVal.ArrayVals {
+			for _, candidate := range ff.Value.ArrayVals {
+				if filterValuesEqual(el, candidate) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// filterValuesEqual compares two store.FilterValues for equality.
+func filterValuesEqual(a, b store.FilterValue) bool {
+	if a.Kind != b.Kind {
+		// Cross-type int/double comparison.
+		if a.Kind == store.FilterValueInt && b.Kind == store.FilterValueDouble {
+			return float64(a.IntVal) == b.DoubleVal
+		}
+		if a.Kind == store.FilterValueDouble && b.Kind == store.FilterValueInt {
+			return a.DoubleVal == float64(b.IntVal)
+		}
+		return false
+	}
+	switch a.Kind {
+	case store.FilterValueNull:
+		return true
+	case store.FilterValueBool:
+		return a.BoolVal == b.BoolVal
+	case store.FilterValueInt:
+		return a.IntVal == b.IntVal
+	case store.FilterValueDouble:
+		return a.DoubleVal == b.DoubleVal
+	case store.FilterValueString:
+		return a.StrVal == b.StrVal
+	case store.FilterValueTime:
+		return a.TimeVal.Equal(b.TimeVal)
+	}
+	return false
+}
+
+// filterValuesCmp returns -1, 0, or +1 comparing a to b.
+// Only meaningful for scalar types; returns 0 for unknowns.
+func filterValuesCmp(a, b store.FilterValue) int {
+	toFloat := func(v store.FilterValue) (float64, bool) {
+		switch v.Kind {
+		case store.FilterValueInt:
+			return float64(v.IntVal), true
+		case store.FilterValueDouble:
+			return v.DoubleVal, true
+		}
+		return 0, false
+	}
+	if fa, ok := toFloat(a); ok {
+		if fb, ok := toFloat(b); ok {
+			switch {
+			case math.IsNaN(fa) || math.IsNaN(fb):
+				return 0
+			case fa < fb:
+				return -1
+			case fa > fb:
+				return 1
+			default:
+				return 0
+			}
+		}
+	}
+	if a.Kind == store.FilterValueString && b.Kind == store.FilterValueString {
+		if a.StrVal < b.StrVal {
+			return -1
+		}
+		if a.StrVal > b.StrVal {
+			return 1
+		}
+		return 0
+	}
+	if a.Kind == store.FilterValueTime && b.Kind == store.FilterValueTime {
+		if a.TimeVal.Before(b.TimeVal) {
+			return -1
+		}
+		if a.TimeVal.After(b.TimeVal) {
+			return 1
+		}
+		return 0
+	}
+	return 0
 }
