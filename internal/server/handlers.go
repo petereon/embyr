@@ -282,6 +282,7 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 			// Apply field transforms if present.
 			transforms := w.GetUpdateTransforms()
 			fields := doc.GetFields()
+			var transformResults []*firestorev1.Value
 			if len(transforms) > 0 {
 				var currFields map[string]*firestorev1.Value
 				needsRead := false
@@ -301,7 +302,7 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 					}
 				}
 				var transformErr error
-				fields, transformErr = applyFieldTransforms(fields, transforms, currFields, now)
+				fields, transformResults, transformErr = applyFieldTransforms(fields, transforms, currFields, now)
 				if transformErr != nil {
 					return nil, transformErr
 				}
@@ -317,7 +318,8 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 				return nil, err
 			}
 			results = append(results, &firestorev1.WriteResult{
-				UpdateTime: timestamppb.New(result.UpdatedAt),
+				UpdateTime:       timestamppb.New(result.UpdatedAt),
+				TransformResults: transformResults,
 			})
 
 		case *firestorev1.Write_Delete:
@@ -380,18 +382,23 @@ func (s *firestoreServer) Write(stream firestorev1.Firestore_WriteServer) error 
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
+			s.log.Info("Write stream EOF")
 			return nil
 		}
 		if err != nil {
 			if status.Code(err) == codes.Canceled {
+				s.log.Info("Write stream canceled")
 				return nil
 			}
+			s.log.Error("Write stream Recv error", zap.Error(err))
 			return err
 		}
 
+		s.log.Info("Write stream: applying batch", zap.Int("writes", len(req.GetWrites())))
 		now = time.Now().UTC()
 		results, err := s.applyWriteBatch(stream.Context(), req.GetWrites(), now)
 		if err != nil {
+			s.log.Error("Write stream: applyWriteBatch error", zap.Error(err))
 			return err
 		}
 		token = []byte(now.Format(time.RFC3339Nano))
@@ -667,45 +674,49 @@ func applyMask(current, incoming map[string]*firestorev1.Value, maskPaths []stri
 	return result
 }
 
-// applyFieldTransforms applies field transforms to fields map in place.
-// currFields is the existing document's fields (nil if document doesn't exist yet).
-// now is the server timestamp used for REQUEST_TIME transforms.
+// applyFieldTransforms applies field transforms and returns the updated fields
+// map plus one transform result per transform entry (required by WriteResult).
 func applyFieldTransforms(
 	fields map[string]*firestorev1.Value,
 	transforms []*firestorev1.DocumentTransform_FieldTransform,
 	currFields map[string]*firestorev1.Value,
 	now time.Time,
-) (map[string]*firestorev1.Value, error) {
+) (map[string]*firestorev1.Value, []*firestorev1.Value, error) {
 	if len(transforms) == 0 {
-		return fields, nil
+		return fields, nil, nil
 	}
 	// Copy so we don't mutate the input proto.
 	result := make(map[string]*firestorev1.Value, len(fields))
 	for k, v := range fields {
 		result[k] = v
 	}
+	transformResults := make([]*firestorev1.Value, 0, len(transforms))
 
 	for _, t := range transforms {
 		fp := t.GetFieldPath()
 		// Only top-level field paths supported in plan 3.
 		if strings.ContainsRune(fp, '.') {
-			return nil, status.Errorf(codes.Unimplemented, "nested field transforms not yet supported: %s", fp)
+			return nil, nil, status.Errorf(codes.Unimplemented, "nested field transforms not yet supported: %s", fp)
 		}
 
 		switch tt := t.GetTransformType().(type) {
 
 		case *firestorev1.DocumentTransform_FieldTransform_SetToServerValue:
+			var val *firestorev1.Value
 			if tt.SetToServerValue == firestorev1.DocumentTransform_FieldTransform_REQUEST_TIME {
-				result[fp] = &firestorev1.Value{
+				val = &firestorev1.Value{
 					ValueType: &firestorev1.Value_TimestampValue{
 						TimestampValue: timestamppb.New(now),
 					},
 				}
+				result[fp] = val
 			}
+			transformResults = append(transformResults, val)
 
 		case *firestorev1.DocumentTransform_FieldTransform_Increment:
 			delta := tt.Increment
 			curr := currFields[fp]
+			var val *firestorev1.Value
 			switch d := delta.GetValueType().(type) {
 			case *firestorev1.Value_IntegerValue:
 				existing := int64(0)
@@ -714,7 +725,7 @@ func applyFieldTransforms(
 						existing = iv.IntegerValue
 					}
 				}
-				result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_IntegerValue{
+				val = &firestorev1.Value{ValueType: &firestorev1.Value_IntegerValue{
 					IntegerValue: existing + d.IntegerValue,
 				}}
 			case *firestorev1.Value_DoubleValue:
@@ -727,10 +738,12 @@ func applyFieldTransforms(
 						existing = float64(ev.IntegerValue)
 					}
 				}
-				result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_DoubleValue{
+				val = &firestorev1.Value{ValueType: &firestorev1.Value_DoubleValue{
 					DoubleValue: existing + d.DoubleValue,
 				}}
 			}
+			result[fp] = val
+			transformResults = append(transformResults, val)
 
 		case *firestorev1.DocumentTransform_FieldTransform_AppendMissingElements:
 			curr := currFields[fp]
@@ -754,9 +767,11 @@ func applyFieldTransforms(
 					merged = append(merged, v)
 				}
 			}
-			result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
+			mergedVal := &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
 				ArrayValue: &firestorev1.ArrayValue{Values: merged},
 			}}
+			result[fp] = mergedVal
+			transformResults = append(transformResults, mergedVal)
 
 		case *firestorev1.DocumentTransform_FieldTransform_RemoveAllFromArray:
 			curr := currFields[fp]
@@ -780,10 +795,12 @@ func applyFieldTransforms(
 					kept = append(kept, e)
 				}
 			}
-			result[fp] = &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
+			keptVal := &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
 				ArrayValue: &firestorev1.ArrayValue{Values: kept},
 			}}
+			result[fp] = keptVal
+			transformResults = append(transformResults, keptVal)
 		}
 	}
-	return result, nil
+	return result, transformResults, nil
 }

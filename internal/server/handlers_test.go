@@ -1,12 +1,15 @@
 package server_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +25,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // testServer holds the REST base URL and gRPC address of a running test server.
@@ -555,6 +560,89 @@ func TestBatchWrite(t *testing.T) {
 }
 
 // TestWrite_Stream verifies the Write bidirectional stream: handshake → write batch → write result.
+func TestListen_WithOrderBy(t *testing.T) {
+	srv := startTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := grpcClient(t, srv)
+
+	const db = "projects/p/databases/(default)"
+	const parent = db + "/documents"
+
+	// Pre-create a document with a createdAt field.
+	_, err := client.CreateDocument(ctx, &firestorev1.CreateDocumentRequest{
+		Parent:       parent,
+		CollectionId: "listen_notes",
+		DocumentId:   "doc1",
+		Document: &firestorev1.Document{
+			Fields: map[string]*firestorev1.Value{
+				"text":     {ValueType: &firestorev1.Value_StringValue{StringValue: "hello"}},
+				"category": {ValueType: &firestorev1.Value_StringValue{StringValue: "general"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Open Listen stream with orderBy — mirrors what the Firebase SDK sends for onSnapshot.
+	stream, err := client.Listen(ctx)
+	require.NoError(t, err)
+
+	err = stream.Send(&firestorev1.ListenRequest{
+		Database: db,
+		TargetChange: &firestorev1.ListenRequest_AddTarget{
+			AddTarget: &firestorev1.Target{
+				TargetId: 2,
+				TargetType: &firestorev1.Target_Query{
+					Query: &firestorev1.Target_QueryTarget{
+						Parent: parent,
+						QueryType: &firestorev1.Target_QueryTarget_StructuredQuery{
+							StructuredQuery: &firestorev1.StructuredQuery{
+								From: []*firestorev1.StructuredQuery_CollectionSelector{
+									{CollectionId: "listen_notes"},
+								},
+								OrderBy: []*firestorev1.StructuredQuery_Order{
+									{
+										Field:     &firestorev1.StructuredQuery_FieldReference{FieldPath: "text"},
+										Direction: firestorev1.StructuredQuery_DESCENDING,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Must receive ADD, a DocumentChange, and CURRENT.
+	gotDoc := false
+	gotCurrent := false
+	for i := 0; i < 5; i++ {
+		resp, err := stream.Recv()
+		require.NoError(t, err, "Listen stream terminated unexpectedly")
+		switch r := resp.GetResponseType().(type) {
+		case *firestorev1.ListenResponse_DocumentChange:
+			gotDoc = true
+			assert.Equal(t, "doc1", lastSegment(r.DocumentChange.GetDocument().GetName()))
+		case *firestorev1.ListenResponse_TargetChange:
+			if r.TargetChange.GetTargetChangeType() == firestorev1.TargetChange_CURRENT {
+				gotCurrent = true
+			}
+		}
+		if gotDoc && gotCurrent {
+			break
+		}
+	}
+	assert.True(t, gotDoc, "should have received the pre-existing document")
+	assert.True(t, gotCurrent, "should have received CURRENT after snapshot")
+}
+
+func lastSegment(path string) string {
+	parts := strings.Split(path, "/")
+	return parts[len(parts)-1]
+}
+
 func TestWrite_Stream(t *testing.T) {
 	srv := startTestServer(t)
 	ctx := context.Background()
@@ -603,4 +691,373 @@ func TestWrite_Stream(t *testing.T) {
 	doc, err := client.GetDocument(ctx, &firestorev1.GetDocumentRequest{Name: docPath})
 	require.NoError(t, err)
 	assert.Equal(t, docPath, doc.GetName())
+}
+
+// ── BrowserChannel HTTP helpers ────────────────────────────────────────────────
+//
+// The Firebase SDK speaks BrowserChannel: proto frames travel as base64 in
+// URL-encoded form POSTs, and server responses stream back as length-prefixed
+// JSON chunks over a long-lived GET.  These helpers implement that exact wire
+// format so we can drive the server from plain Go HTTP code.
+
+// bcFormBody encodes a proto message as a BrowserChannel forward-channel form
+// body using proto3-JSON (sendRawJson:true format):
+// count=1&ofs=0&req0___data__=<proto3-json>
+func bcFormBody(msg proto.Message) string {
+	b, _ := protojson.Marshal(msg)
+	return url.Values{
+		"count":         {"1"},
+		"ofs":           {"0"},
+		"req0___data__": {string(b)},
+	}.Encode()
+}
+
+// bcParseSessionID extracts the session ID from a BrowserChannel connect-chunk body.
+// Format: <len>\n[[0,["c","<SID>","",8,8,0]],[1,["noop"]]]
+func bcParseSessionID(t *testing.T, body string) string {
+	t.Helper()
+	nl := strings.IndexByte(body, '\n')
+	require.GreaterOrEqual(t, nl, 0, "connect chunk must contain newline, got: %q", body)
+	var outer []json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(body[nl+1:]), &outer))
+	require.GreaterOrEqual(t, len(outer), 1)
+	var msg0 []json.RawMessage
+	require.NoError(t, json.Unmarshal(outer[0], &msg0))
+	require.GreaterOrEqual(t, len(msg0), 2)
+	var inner []json.RawMessage
+	require.NoError(t, json.Unmarshal(msg0[1], &inner))
+	require.GreaterOrEqual(t, len(inner), 2)
+	var msgType, sid string
+	require.NoError(t, json.Unmarshal(inner[0], &msgType))
+	require.Equal(t, "c", msgType, "expected 'c' control message")
+	require.NoError(t, json.Unmarshal(inner[1], &sid))
+	return sid
+}
+
+// bcChunk holds one decoded BrowserChannel back-channel chunk.
+type bcChunk struct {
+	raw json.RawMessage // proto3-JSON object (nil for noop chunks)
+	err error
+}
+
+// bcReadChunks reads BrowserChannel data chunks from r and sends decoded proto
+// bytes to ch.  Noop keep-alive chunks are skipped silently.  Stops after
+// reading maxChunks data (non-noop) chunks or on EOF/error.
+// Must be called from a goroutine; does NOT call t methods.
+func bcReadChunks(r io.Reader, maxChunks int, ch chan<- bcChunk) {
+	br := bufio.NewReaderSize(r, 64*1024)
+	sent := 0
+	for sent < maxChunks {
+		// Each BrowserChannel chunk: "<N>\n<N bytes of JSON>"
+		lenLine, err := br.ReadString('\n')
+		if err != nil {
+			if err != io.EOF {
+				ch <- bcChunk{err: err}
+			}
+			return
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(lenLine))
+		if err != nil {
+			ch <- bcChunk{err: fmt.Errorf("bcReadChunks: parse length %q: %w", lenLine, err)}
+			return
+		}
+		jsonBuf := make([]byte, n)
+		if _, err := io.ReadFull(br, jsonBuf); err != nil {
+			ch <- bcChunk{err: fmt.Errorf("bcReadChunks: read json body: %w", err)}
+			return
+		}
+		// Parse [[seq, ["<base64>"]]] or [[seq, ["noop"]]]
+		var outer []json.RawMessage
+		if err := json.Unmarshal(jsonBuf, &outer); err != nil || len(outer) == 0 {
+			continue // malformed; skip
+		}
+		var entry []json.RawMessage
+		if err := json.Unmarshal(outer[0], &entry); err != nil || len(entry) < 2 {
+			continue
+		}
+		var payload []json.RawMessage
+		if err := json.Unmarshal(entry[1], &payload); err != nil || len(payload) == 0 {
+			continue
+		}
+		// payload[0] is either "noop" (JSON string) or a proto3-JSON object.
+		var noop string
+		if json.Unmarshal(payload[0], &noop) == nil {
+			continue // string value — noop or other control; skip
+		}
+		ch <- bcChunk{raw: json.RawMessage(payload[0])}
+		sent++
+	}
+}
+
+// TestBrowserChannel_Write_AddDocWithServerTimestamp exercises the complete
+// BrowserChannel Write protocol at the HTTP layer — exactly what the Firebase
+// JS SDK sends when addDoc(..., { createdAt: serverTimestamp() }) is called.
+//
+//  1. POST (no SID) → establish session, get stream_id / stream_token
+//  2. GET (with SID) → open back channel to receive WriteResponses
+//  3. POST (with SID) → send Write with update_transforms[serverTimestamp]
+//  4. Assert WriteResult arrives via back channel
+//  5. Assert document persisted with createdAt timestamp field
+func TestBrowserChannel_Write_AddDocWithServerTimestamp(t *testing.T) {
+	ts := startTestServer(t)
+	const db     = "projects/p/databases/(default)"
+	const parent = db + "/documents"
+	writeURL := ts.restBase + "/google.firestore.v1.Firestore/Write/channel"
+
+	// ── Step 1: Establish session ──────────────────────────────────────────────
+	postResp, err := http.Post(
+		writeURL+"?VER=8&RID=rpc",
+		"application/x-www-form-urlencoded",
+		strings.NewReader(bcFormBody(&firestorev1.WriteRequest{Database: db})),
+	)
+	require.NoError(t, err)
+	defer postResp.Body.Close()
+	require.Equal(t, http.StatusOK, postResp.StatusCode)
+	rawBody, err := io.ReadAll(postResp.Body)
+	require.NoError(t, err)
+	sid := bcParseSessionID(t, string(rawBody))
+	require.NotEmpty(t, sid, "session ID must not be empty after connect-chunk")
+	t.Logf("BrowserChannel Write session: SID=%s", sid)
+
+	// ── Step 2: Open GET back channel ─────────────────────────────────────────
+	// Read 2 data chunks: handshake WriteResponse then the write WriteResponse.
+	chunks := make(chan bcChunk, 4)
+	go func() {
+		getResp, err := http.Get(writeURL + "?VER=8&SID=" + sid + "&RID=rpc&TYPE=xmlhttp")
+		if err != nil {
+			chunks <- bcChunk{err: err}
+			return
+		}
+		defer getResp.Body.Close()
+		bcReadChunks(getResp.Body, 2, chunks)
+	}()
+
+	// ── Step 3: Read handshake WriteResponse ──────────────────────────────────
+	var hsResp firestorev1.WriteResponse
+	select {
+	case c := <-chunks:
+		require.NoError(t, c.err, "back-channel error reading handshake")
+		require.NoError(t, protojson.Unmarshal(c.raw, &hsResp))
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for handshake WriteResponse")
+	}
+	require.NotEmpty(t, hsResp.GetStreamId(), "handshake must return stream_id")
+	require.NotEmpty(t, hsResp.GetStreamToken(), "handshake must return stream_token")
+	t.Logf("Handshake WriteResponse: stream_id=%s", hsResp.GetStreamId())
+
+	// ── Step 4: Send write with serverTimestamp() ──────────────────────────────
+	docPath := parent + "/notes/testdoc1"
+	wr2, err := http.Post(
+		writeURL+"?VER=8&SID="+sid+"&RID=2",
+		"application/x-www-form-urlencoded",
+		strings.NewReader(bcFormBody(&firestorev1.WriteRequest{
+			Database:    db,
+			StreamId:    hsResp.GetStreamId(),
+			StreamToken: hsResp.GetStreamToken(),
+			Writes: []*firestorev1.Write{{
+				Operation: &firestorev1.Write_Update{
+					Update: &firestorev1.Document{
+						Name: docPath,
+						Fields: map[string]*firestorev1.Value{
+							"text":     {ValueType: &firestorev1.Value_StringValue{StringValue: "hello"}},
+							"votes":    {ValueType: &firestorev1.Value_IntegerValue{IntegerValue: 0}},
+							"tags":     {ValueType: &firestorev1.Value_ArrayValue{ArrayValue: &firestorev1.ArrayValue{}}},
+							"category": {ValueType: &firestorev1.Value_StringValue{StringValue: "general"}},
+						},
+					},
+				},
+				UpdateTransforms: []*firestorev1.DocumentTransform_FieldTransform{{
+					FieldPath: "createdAt",
+					TransformType: &firestorev1.DocumentTransform_FieldTransform_SetToServerValue{
+						SetToServerValue: firestorev1.DocumentTransform_FieldTransform_REQUEST_TIME,
+					},
+				}},
+			}},
+		})),
+	)
+	require.NoError(t, err)
+	wr2.Body.Close()
+	require.Equal(t, http.StatusOK, wr2.StatusCode, "write POST must return 200")
+
+	// ── Step 5: Assert WriteResult arrives via back channel ────────────────────
+	var writeResp firestorev1.WriteResponse
+	select {
+	case c := <-chunks:
+		require.NoError(t, c.err, "back-channel error reading write result")
+		require.NoError(t, protojson.Unmarshal(c.raw, &writeResp))
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for WriteResult via back channel")
+	}
+	require.Len(t, writeResp.GetWriteResults(), 1, "expected one WriteResult")
+	assert.NotNil(t, writeResp.GetWriteResults()[0].GetUpdateTime(), "WriteResult must have update_time")
+	t.Logf("WriteResult received: update_time=%v", writeResp.GetWriteResults()[0].GetUpdateTime())
+
+	// ── Step 6: Assert document persisted with createdAt timestamp field ───────
+	client := grpcClient(t, ts)
+	doc, err := client.GetDocument(context.Background(),
+		&firestorev1.GetDocumentRequest{Name: docPath})
+	require.NoError(t, err)
+	createdAt, ok := doc.GetFields()["createdAt"]
+	require.True(t, ok, "createdAt must be present in persisted document")
+	assert.NotNil(t, createdAt.GetTimestampValue(), "createdAt must be a Timestamp value")
+}
+
+// TestBrowserChannel_Listen_ReceivesChangeAfterWrite checks the end-to-end
+// flow that matches the browser app: establish a Listen channel with
+// orderBy('createdAt','desc'), receive the initial (empty) snapshot, then
+// write a doc via gRPC Write stream and confirm the DocumentChange arrives on
+// the Listen back channel.
+func TestBrowserChannel_Listen_ReceivesChangeAfterWrite(t *testing.T) {
+	ts := startTestServer(t)
+	const db     = "projects/p/databases/(default)"
+	const parent = db + "/documents"
+	listenURL := ts.restBase + "/google.firestore.v1.Firestore/Listen/channel"
+
+	// ── Step 1: Establish Listen session (empty initial POST) ─────────────────
+	postResp, err := http.Post(
+		listenURL+"?VER=8&RID=rpc",
+		"application/x-www-form-urlencoded",
+		strings.NewReader("count=0&ofs=0"),
+	)
+	require.NoError(t, err)
+	defer postResp.Body.Close()
+	require.Equal(t, http.StatusOK, postResp.StatusCode)
+	raw, err := io.ReadAll(postResp.Body)
+	require.NoError(t, err)
+	sid := bcParseSessionID(t, string(raw))
+	require.NotEmpty(t, sid)
+	t.Logf("Listen session established: SID=%s", sid)
+
+	// ── Step 2: Open GET back channel ─────────────────────────────────────────
+	// We expect: ADD TargetChange, CURRENT TargetChange, then one DocumentChange
+	// after the write.  Read up to 5 chunks to find them all.
+	listenChunks := make(chan bcChunk, 8)
+	go func() {
+		getResp, err := http.Get(listenURL + "?VER=8&SID=" + sid + "&RID=rpc&TYPE=xmlhttp")
+		if err != nil {
+			listenChunks <- bcChunk{err: err}
+			return
+		}
+		defer getResp.Body.Close()
+		bcReadChunks(getResp.Body, 5, listenChunks)
+	}()
+
+	// ── Step 3: Send AddTarget with orderBy('createdAt', 'desc') ──────────────
+	addResp, err := http.Post(
+		listenURL+"?VER=8&SID="+sid+"&RID=2",
+		"application/x-www-form-urlencoded",
+		strings.NewReader(bcFormBody(&firestorev1.ListenRequest{
+			Database: db,
+			TargetChange: &firestorev1.ListenRequest_AddTarget{
+				AddTarget: &firestorev1.Target{
+					TargetId: 2,
+					TargetType: &firestorev1.Target_Query{
+						Query: &firestorev1.Target_QueryTarget{
+							Parent: parent,
+							QueryType: &firestorev1.Target_QueryTarget_StructuredQuery{
+								StructuredQuery: &firestorev1.StructuredQuery{
+									From: []*firestorev1.StructuredQuery_CollectionSelector{
+										{CollectionId: "notes"},
+									},
+									OrderBy: []*firestorev1.StructuredQuery_Order{
+										{
+											Field:     &firestorev1.StructuredQuery_FieldReference{FieldPath: "createdAt"},
+											Direction: firestorev1.StructuredQuery_DESCENDING,
+										},
+										{
+											Field:     &firestorev1.StructuredQuery_FieldReference{FieldPath: "__name__"},
+											Direction: firestorev1.StructuredQuery_DESCENDING,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})),
+	)
+	require.NoError(t, err)
+	addResp.Body.Close()
+	require.Equal(t, http.StatusOK, addResp.StatusCode)
+
+	// ── Step 4: Drain initial snapshot (ADD + CURRENT target changes) ─────────
+	gotAdd, gotCurrent := false, false
+	deadline := time.After(3 * time.Second)
+	for !gotAdd || !gotCurrent {
+		select {
+		case c := <-listenChunks:
+			require.NoError(t, c.err, "Listen back-channel error during snapshot")
+			var lr firestorev1.ListenResponse
+			require.NoError(t, protojson.Unmarshal(c.raw, &lr))
+			if tc, ok := lr.GetResponseType().(*firestorev1.ListenResponse_TargetChange); ok {
+				switch tc.TargetChange.GetTargetChangeType() {
+				case firestorev1.TargetChange_ADD:
+					gotAdd = true
+					t.Log("Got ADD TargetChange")
+				case firestorev1.TargetChange_CURRENT:
+					gotCurrent = true
+					t.Log("Got CURRENT TargetChange (snapshot complete)")
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for initial snapshot (ADD=%v CURRENT=%v)", gotAdd, gotCurrent)
+		}
+	}
+
+	// ── Step 5: Write a doc with serverTimestamp via gRPC Write stream ─────────
+	grpcStreamClient := grpcClient(t, ts)
+	wstream, err := grpcStreamClient.Write(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, wstream.Send(&firestorev1.WriteRequest{Database: db}))
+	hsResp, err := wstream.Recv()
+	require.NoError(t, err)
+
+	docPath := parent + "/notes/live_doc1"
+	require.NoError(t, wstream.Send(&firestorev1.WriteRequest{
+		Database:    db,
+		StreamId:    hsResp.GetStreamId(),
+		StreamToken: hsResp.GetStreamToken(),
+		Writes: []*firestorev1.Write{{
+			Operation: &firestorev1.Write_Update{
+				Update: &firestorev1.Document{
+					Name: docPath,
+					Fields: map[string]*firestorev1.Value{
+						"text": {ValueType: &firestorev1.Value_StringValue{StringValue: "live update"}},
+					},
+				},
+			},
+			UpdateTransforms: []*firestorev1.DocumentTransform_FieldTransform{{
+				FieldPath: "createdAt",
+				TransformType: &firestorev1.DocumentTransform_FieldTransform_SetToServerValue{
+					SetToServerValue: firestorev1.DocumentTransform_FieldTransform_REQUEST_TIME,
+				},
+			}},
+		}},
+	}))
+	_, err = wstream.Recv() // consume WriteResult
+	require.NoError(t, err)
+
+	// ── Step 6: Expect DocumentChange to arrive on the Listen back channel ─────
+	deadline2 := time.After(3 * time.Second)
+	for {
+		select {
+		case c := <-listenChunks:
+			require.NoError(t, c.err)
+			var lr firestorev1.ListenResponse
+			require.NoError(t, protojson.Unmarshal(c.raw, &lr))
+			if dc, ok := lr.GetResponseType().(*firestorev1.ListenResponse_DocumentChange); ok {
+				name := dc.DocumentChange.GetDocument().GetName()
+				assert.Equal(t, docPath, name, "DocumentChange must be for the written doc")
+				fields := dc.DocumentChange.GetDocument().GetFields()
+				assert.NotNil(t, fields["createdAt"].GetTimestampValue(),
+					"DocumentChange doc must include the serverTimestamp createdAt")
+				t.Logf("DocumentChange received for %s with createdAt=%v",
+					name, fields["createdAt"].GetTimestampValue())
+				return // success
+			}
+		case <-deadline2:
+			t.Fatal("timeout: DocumentChange for written doc never arrived on Listen back channel")
+		}
+	}
 }

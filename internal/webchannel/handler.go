@@ -2,16 +2,18 @@ package webchannel
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // listenBridge is a fake Firestore_ListenServer that routes between HTTP and the gRPC handler.
@@ -97,12 +99,37 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 		sess.bridge = bridge
 		sess.cancel = cancel
 
+		// gRPC handler goroutine.
 		go func() {
 			defer cancel()
 			defer h.mgr.Remove(sess.ID)
 			_ = h.listenFn(bridge)
 		}()
 
+		// Pump goroutine: reads ListenResponses from the gRPC handler and
+		// appends BrowserChannel JSON chunks to the session log for replay to any
+		// number of concurrent GET back-channel handlers.
+		// WebChannel uses sendRawJson:true so messages are proto3-JSON objects.
+		go func() {
+			for {
+				select {
+				case resp, ok := <-bridge.sendCh:
+					if !ok {
+						return
+					}
+					b, err := protojson.Marshal(resp)
+					if err != nil {
+						continue
+					}
+					chunk := sess.FormatDataChunk(json.RawMessage(b))
+					sess.listenLog.Append(chunk)
+				case <-bridge.ctx.Done():
+					return
+				}
+			}
+		}()
+
+		log.Printf("[webchannel] POST new-session sid=%s parsed=%d reqs", sess.ID, len(reqs))
 		for _, req := range reqs {
 			select {
 			case bridge.recvCh <- req:
@@ -123,17 +150,21 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
-	reqs, _ := parseForwardBody(r)
-	for _, req := range reqs {
-		select {
-		case sess.bridge.recvCh <- req:
-		default:
+	if !sess.SeenRID(rid) {
+		reqs, _ := parseForwardBody(r)
+		for _, req := range reqs {
+			select {
+			case sess.bridge.recvCh <- req:
+			default:
+			}
 		}
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
 // handleBack handles GET /Listen/channel — the long-polling back channel.
+// Multiple concurrent connections (CI=0, CI=1, …) are each served independently
+// from the session's message log, so no message is split between connections.
 func (h *Handler) handleBack(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("SID")
 	sess := h.mgr.Get(sid)
@@ -141,6 +172,18 @@ func (h *Handler) handleBack(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
+
+	// AID is the last array-id the client acknowledged. The first data chunk
+	// is seq=2 (log index 0). For seq S, log index = S-2. We want seq > AID,
+	// i.e., log index >= AID-1.
+	logIdx := 0
+	if aidStr := r.URL.Query().Get("AID"); aidStr != "" {
+		if n, err := strconv.Atoi(aidStr); err == nil && n >= 2 {
+			logIdx = n - 1
+		}
+	}
+	ci := r.URL.Query().Get("CI")
+	log.Printf("[webchannel] GET back-channel sid=%s CI=%s logIdx=%d", sid, ci, logIdx)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -158,23 +201,26 @@ func (h *Handler) handleBack(w http.ResponseWriter, r *http.Request) {
 	defer keepAlive.Stop()
 
 	for {
+		chunks, notify := sess.listenLog.From(logIdx)
+		for _, chunk := range chunks {
+			_, _ = w.Write(chunk)
+			flusher.Flush()
+		}
+		logIdx += len(chunks)
+
 		select {
 		case <-r.Context().Done():
 			return
 		case <-sess.bridge.ctx.Done():
+			// Drain any remaining chunks before closing.
+			final, _ := sess.listenLog.From(logIdx)
+			for _, c := range final {
+				_, _ = w.Write(c)
+				flusher.Flush()
+			}
 			return
-		case resp, ok := <-sess.bridge.sendCh:
-			if !ok {
-				return
-			}
-			b, err := proto.Marshal(resp)
-			if err != nil {
-				continue
-			}
-			frame := EncodeGRPCWebFrame(b)
-			chunk := sess.FormatDataChunk(frame)
-			_, _ = w.Write(chunk)
-			flusher.Flush()
+		case <-notify:
+			// New data in log — loop to drain it.
 		case <-keepAlive.C:
 			_, _ = w.Write(sess.FormatNoopChunk())
 			flusher.Flush()
@@ -261,10 +307,31 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 		sess.writeBridge = bridge
 		sess.cancel = cancel
 
+		// gRPC handler goroutine.
 		go func() {
 			defer cancel()
 			defer h.mgr.Remove(sess.ID)
 			_ = h.writeFn(bridge)
+		}()
+
+		// Pump goroutine: reads WriteResponses and appends JSON chunks to session log.
+		go func() {
+			for {
+				select {
+				case resp, ok := <-bridge.sendCh:
+					if !ok {
+						return
+					}
+					b, err := protojson.Marshal(resp)
+					if err != nil {
+						continue
+					}
+					chunk := sess.FormatDataChunk(json.RawMessage(b))
+					sess.writeLog.Append(chunk)
+				case <-bridge.ctx.Done():
+					return
+				}
+			}
 		}()
 
 		for _, req := range reqs {
@@ -283,15 +350,23 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 
 	sess := h.mgr.Get(sid)
 	if sess == nil {
+		log.Printf("[webchannel] Write POST sid=%s not found", sid)
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
-	reqs, _ := parseWriteForwardBody(r)
-	for _, req := range reqs {
-		select {
-		case sess.writeBridge.recvCh <- req:
-		default:
+	if !sess.SeenRID(rid) {
+		reqs, _ := parseWriteForwardBody(r)
+		log.Printf("[webchannel] Write POST sid=%s rid=%s parsed=%d reqs", sid, rid, len(reqs))
+		for _, req := range reqs {
+			log.Printf("[webchannel] Write req writes=%d", len(req.GetWrites()))
+			select {
+			case sess.writeBridge.recvCh <- req:
+			default:
+				log.Printf("[webchannel] Write recvCh full, dropping req")
+			}
 		}
+	} else {
+		log.Printf("[webchannel] Write POST sid=%s rid=%s duplicate (skipped)", sid, rid)
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -300,9 +375,18 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("SID")
 	sess := h.mgr.Get(sid)
 	if sess == nil {
+		log.Printf("[webchannel] Write GET back-channel sid=%s not found", sid)
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
+
+	logIdx := 0
+	if aidStr := r.URL.Query().Get("AID"); aidStr != "" {
+		if n, err := strconv.Atoi(aidStr); err == nil && n >= 2 {
+			logIdx = n - 1
+		}
+	}
+	log.Printf("[webchannel] Write GET back-channel sid=%s AID=%s logIdx=%d", sid, r.URL.Query().Get("AID"), logIdx)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -320,23 +404,25 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 	defer keepAlive.Stop()
 
 	for {
+		chunks, notify := sess.writeLog.From(logIdx)
+		for _, chunk := range chunks {
+			_, _ = w.Write(chunk)
+			flusher.Flush()
+		}
+		logIdx += len(chunks)
+
 		select {
 		case <-r.Context().Done():
 			return
 		case <-sess.writeBridge.ctx.Done():
+			final, _ := sess.writeLog.From(logIdx)
+			for _, c := range final {
+				_, _ = w.Write(c)
+				flusher.Flush()
+			}
 			return
-		case resp, ok := <-sess.writeBridge.sendCh:
-			if !ok {
-				return
-			}
-			b, err := proto.Marshal(resp)
-			if err != nil {
-				continue
-			}
-			frame := EncodeGRPCWebFrame(b)
-			chunk := sess.FormatDataChunk(frame)
-			_, _ = w.Write(chunk)
-			flusher.Flush()
+		case <-notify:
+			// New data in log — loop to drain it.
 		case <-keepAlive.C:
 			_, _ = w.Write(sess.FormatNoopChunk())
 			flusher.Flush()
@@ -345,7 +431,8 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseForwardBody decodes form-encoded BrowserChannel forward channel body.
-// Body format: count=N&ofs=M&req0___data__=<base64>&req1___data__=<base64>...
+// Body format: count=N&ofs=M&req0___data__=<json>&req1___data__=<json>...
+// WebChannel uses sendRawJson:true so each req___data__ value is a proto3-JSON string.
 func parseForwardBody(r *http.Request) ([]*firestorev1.ListenRequest, error) {
 	if err := r.ParseForm(); err != nil {
 		return nil, err
@@ -358,20 +445,12 @@ func parseForwardBody(r *http.Request) ([]*firestorev1.ListenRequest, error) {
 	}
 	reqs := make([]*firestorev1.ListenRequest, 0, count)
 	for i := 0; i < count; i++ {
-		encoded := r.FormValue(fmt.Sprintf("req%d___data__", i))
-		if encoded == "" {
-			continue
-		}
-		frameBytes, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			continue
-		}
-		protoBytes, err := DecodeGRPCWebFrame(frameBytes)
-		if err != nil {
+		raw := r.FormValue(fmt.Sprintf("req%d___data__", i))
+		if raw == "" {
 			continue
 		}
 		req := &firestorev1.ListenRequest{}
-		if err := proto.Unmarshal(protoBytes, req); err != nil {
+		if err := protojson.Unmarshal([]byte(raw), req); err != nil {
 			continue
 		}
 		reqs = append(reqs, req)
@@ -392,20 +471,12 @@ func parseWriteForwardBody(r *http.Request) ([]*firestorev1.WriteRequest, error)
 	}
 	reqs := make([]*firestorev1.WriteRequest, 0, count)
 	for i := 0; i < count; i++ {
-		encoded := r.FormValue(fmt.Sprintf("req%d___data__", i))
-		if encoded == "" {
-			continue
-		}
-		frameBytes, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			continue
-		}
-		protoBytes, err := DecodeGRPCWebFrame(frameBytes)
-		if err != nil {
+		raw := r.FormValue(fmt.Sprintf("req%d___data__", i))
+		if raw == "" {
 			continue
 		}
 		req := &firestorev1.WriteRequest{}
-		if err := proto.Unmarshal(protoBytes, req); err != nil {
+		if err := protojson.Unmarshal([]byte(raw), req); err != nil {
 			continue
 		}
 		reqs = append(reqs, req)

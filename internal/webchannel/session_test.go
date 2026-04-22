@@ -1,6 +1,7 @@
 package webchannel_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/petereon/firstyr/internal/webchannel"
@@ -12,16 +13,13 @@ func TestSession_NewAndEncodeMessage(t *testing.T) {
 	sess := mgr.NewSession()
 	require.NotEmpty(t, sess.ID)
 
-	// Encode a trivial proto payload
-	data := []byte("hello")
-	frame := webchannel.EncodeGRPCWebFrame(data)
-	require.Equal(t, byte(0x00), frame[0]) // not compressed
-	require.Len(t, frame, 5+len(data))
-
-	msg := sess.FormatDataChunk(frame)
+	// Encode a trivial JSON proto payload (sendRawJson:true format)
+	data := json.RawMessage(`{"targetChange":{"targetChangeType":"NO_CHANGE"}}`)
+	msg := sess.FormatDataChunk(data)
 	require.NotEmpty(t, msg)
 	// verify it's valid JSON with BrowserChannel format: <len>\n<json>
 	require.Contains(t, string(msg), "\n")
+	require.Contains(t, string(msg), "targetChange")
 
 	// Verify FormatConnectChunk contains the session ID
 	connectMsg := sess.FormatConnectChunk()

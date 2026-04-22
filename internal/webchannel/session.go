@@ -3,7 +3,6 @@ package webchannel
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +10,45 @@ import (
 	"sync"
 	"sync/atomic"
 )
+
+// MsgLog is a append-only message log with fan-out notification.
+// Pump goroutines append; GET back-channel handlers read and replay.
+type MsgLog struct {
+	mu      sync.Mutex
+	entries [][]byte
+	ready   chan struct{} // closed when new data arrives; replaced each time
+}
+
+func newMsgLog() *MsgLog {
+	return &MsgLog{ready: make(chan struct{})}
+}
+
+// Append stores chunk and wakes up all waiting readers.
+func (ml *MsgLog) Append(chunk []byte) {
+	ml.mu.Lock()
+	ml.entries = append(ml.entries, chunk)
+	ch := ml.ready
+	ml.ready = make(chan struct{})
+	ml.mu.Unlock()
+	close(ch)
+}
+
+// From returns all log entries starting at idx, and a channel that is closed
+// when the next entry arrives. The caller should advance its index by
+// len(returned) and loop.
+func (ml *MsgLog) From(idx int) ([][]byte, <-chan struct{}) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	if idx < 0 {
+		idx = 0
+	}
+	var out [][]byte
+	if idx < len(ml.entries) {
+		out = make([][]byte, len(ml.entries)-idx)
+		copy(out, ml.entries[idx:])
+	}
+	return out, ml.ready
+}
 
 // Manager owns all active BrowserChannel sessions.
 type Manager struct {
@@ -27,9 +65,10 @@ func NewManager() *Manager {
 func (m *Manager) NewSession() *Session {
 	id := newSessionID()
 	s := &Session{
-		ID:     id,
-		mgr:    m,
-		outbox: make(chan []byte, 128),
+		ID:        id,
+		mgr:       m,
+		listenLog: newMsgLog(),
+		writeLog:  newMsgLog(),
 	}
 	m.mu.Lock()
 	m.sessions[id] = s
@@ -59,27 +98,30 @@ func newSessionID() string {
 
 // Session holds the state for a single BrowserChannel connection.
 type Session struct {
-	ID     string
-	mgr    *Manager
-	seq    atomic.Int64 // next message sequence number
-	outbox chan []byte   // raw BrowserChannel chunks to write to the GET backchannel
+	ID  string
+	mgr *Manager
+	seq atomic.Int64 // next message sequence number
+	// message logs for fan-out replay to concurrent GET back-channels
+	listenLog *MsgLog
+	writeLog  *MsgLog
 	// set after session establishment by the HTTP handler; exactly one of these is non-nil
 	bridge      *listenBridge
 	writeBridge *writeBridge
 	cancel      context.CancelFunc
+	// RID deduplication: BrowserChannel retries POSTs with same RID on timeout
+	lastRIDMu sync.Mutex
+	lastRID   string
 }
 
-// Send enqueues a serialized BrowserChannel chunk for delivery to the client.
-func (s *Session) Send(chunk []byte) {
-	select {
-	case s.outbox <- chunk:
-	default: // drop if buffer full (slow client)
+// SeenRID returns true if rid was already processed, false and records it otherwise.
+func (s *Session) SeenRID(rid string) bool {
+	s.lastRIDMu.Lock()
+	defer s.lastRIDMu.Unlock()
+	if s.lastRID == rid {
+		return true
 	}
-}
-
-// Outbox returns the output channel for the GET handler to drain.
-func (s *Session) Outbox() <-chan []byte {
-	return s.outbox
+	s.lastRID = rid
+	return false
 }
 
 // EncodeGRPCWebFrame wraps proto bytes in a gRPC-Web frame:
@@ -117,13 +159,14 @@ func (s *Session) FormatConnectChunk() []byte {
 	return []byte(fmt.Sprintf("%d\n%s", len(b), b))
 }
 
-// FormatDataChunk wraps a gRPC-Web frame in a BrowserChannel JSON data chunk.
-// frame must be a complete gRPC-Web frame (output of EncodeGRPCWebFrame).
-func (s *Session) FormatDataChunk(frame []byte) []byte {
+// FormatDataChunk wraps a JSON proto message in a BrowserChannel data chunk.
+// data must be a valid JSON value (the Firestore proto in REST/proto3-JSON format).
+// WebChannel is configured with sendRawJson:true, so messages are plain JSON objects,
+// not base64-encoded gRPC-Web binary frames.
+func (s *Session) FormatDataChunk(data json.RawMessage) []byte {
 	seq := s.seq.Add(1) - 1
-	encoded := base64.StdEncoding.EncodeToString(frame)
 	msgs := []interface{}{
-		[]interface{}{seq, []interface{}{encoded}},
+		[]interface{}{seq, []interface{}{data}},
 	}
 	b, _ := json.Marshal(msgs)
 	return []byte(fmt.Sprintf("%d\n%s", len(b), b))

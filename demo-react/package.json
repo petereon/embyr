@@ -1,0 +1,27 @@
+{
+  "name": "firstyr-demo",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "firebase": "^10.14.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  },
+  "overrides": {
+    "baseline-browser-mapping": "2.10.13",
+    "caniuse-lite": "1.0.30001726",
+    "electron-to-chromium": "1.5.331",
+    "protobufjs": "7.5.4",
+    "@types/node": "25.5.0"
+  }
+}
