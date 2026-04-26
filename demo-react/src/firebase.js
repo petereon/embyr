@@ -11,4 +11,6 @@ export const db = getFirestore(app);
 
 // Vite proxies /v1/* (REST) and /google.firestore.v1.Firestore/* (gRPC-Web + BrowserChannel)
 // to http://localhost:17081 — firstyr handles both transports.
-connectFirestoreEmulator(db, 'localhost', 5173);
+// Connect directly to the Go server, bypassing Vite proxy which buffers
+// chunked responses and delays BrowserChannel session ID delivery.
+connectFirestoreEmulator(db, 'localhost', 17081);

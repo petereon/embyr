@@ -47,14 +47,17 @@ func TestBuildPath(t *testing.T) {
 }
 
 func TestNewDocumentID(t *testing.T) {
-	id := codec.NewDocumentID()
+	id, err := codec.NewDocumentID()
+	assert.NoError(t, err)
 	assert.Len(t, id, 20)
 	for _, ch := range id {
 		assert.True(t, (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'),
 			"unexpected char %c in document ID", ch)
 	}
 	// IDs must not collide
-	assert.NotEqual(t, id, codec.NewDocumentID())
+	id2, err2 := codec.NewDocumentID()
+	assert.NoError(t, err2)
+	assert.NotEqual(t, id, id2)
 }
 
 func TestProtoToStoreRoundTrip(t *testing.T) {

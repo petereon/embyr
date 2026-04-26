@@ -1,0 +1,24 @@
+{
+  "name": "firstyr-integration",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "2.1.9",
+    "happy-dom": "20.9.0"
+  },
+  "dependencies": {
+    "firebase": "^10.14.1"
+  },
+  "overrides": {
+    "baseline-browser-mapping": "2.10.13",
+    "caniuse-lite": "1.0.30001726",
+    "electron-to-chromium": "1.5.331",
+    "protobufjs": "7.5.4",
+    "@types/node": "25.5.0",
+    "rollup": "4.60.1",
+    "postcss": "8.5.9"
+  }
+}

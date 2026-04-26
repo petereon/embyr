@@ -1,12 +1,14 @@
 package codec
 
 import (
+	"fmt"
 	"math"
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
 	"github.com/petereon/firstyr/internal/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // FilterValueFromProto converts a Firestore Value proto to a store.FilterValue.
@@ -35,6 +37,11 @@ func FilterValueFromProto(v *firestorev1.Value) store.FilterValue {
 		}
 		return store.FilterValue{Kind: store.FilterValueArray, ArrayVals: arr}
 	default:
+		// Map and other complex types: serialize to protojson so the SQL layer
+		// can compare the exact JSON blob against stored array elements.
+		if b, err := protojson.Marshal(v); err == nil {
+			return store.FilterValue{Kind: store.FilterValueJSON, StrVal: string(b)}
+		}
 		return store.FilterValue{Kind: store.FilterValueString, StrVal: v.String()}
 	}
 }
@@ -74,8 +81,11 @@ func QueryFromStructuredQuery(parent string, sq *firestorev1.StructuredQuery, li
 		q.PageSize = 300
 	}
 
-	if sq.GetStartAt() != nil || sq.GetEndAt() != nil {
-		return nil, status.Error(codes.Unimplemented, "query cursors (startAt/endAt) are not yet supported")
+	if c := sq.GetStartAt(); c != nil {
+		q.StartCursor = protoCursor(c, false)
+	}
+	if c := sq.GetEndAt(); c != nil {
+		q.EndCursor = protoCursor(c, true)
 	}
 
 	return q, nil
@@ -108,9 +118,20 @@ func protoCompositeFilter(f *firestorev1.StructuredQuery_Filter) (*store.Composi
 }
 
 func protoFieldFilter(f *firestorev1.StructuredQuery_Filter) (store.FieldFilter, error) {
+	if uf := f.GetUnaryFilter(); uf != nil {
+		field := uf.GetField().GetFieldPath()
+		switch uf.GetOp() {
+		case firestorev1.StructuredQuery_UnaryFilter_IS_NULL:
+			return store.FieldFilter{Field: field, Op: store.FilterOpEqual, Value: store.FilterValue{Kind: store.FilterValueNull}}, nil
+		case firestorev1.StructuredQuery_UnaryFilter_IS_NOT_NULL:
+			return store.FieldFilter{Field: field, Op: store.FilterOpNotEqual, Value: store.FilterValue{Kind: store.FilterValueNull}}, nil
+		default:
+			return store.FieldFilter{}, status.Errorf(codes.Unimplemented, "unary filter op %v not supported", uf.GetOp())
+		}
+	}
 	ff := f.GetFieldFilter()
 	if ff == nil {
-		return store.FieldFilter{}, status.Error(codes.InvalidArgument, "expected a field filter")
+		return store.FieldFilter{}, status.Error(codes.InvalidArgument, "expected a field or unary filter")
 	}
 	op, err := protoFilterOp(ff.GetOp())
 	if err != nil {
@@ -158,7 +179,50 @@ func protoOrderBys(orders []*firestorev1.StructuredQuery_Order) []store.OrderBy 
 	return result
 }
 
-func protoCursor(c *firestorev1.Cursor, orders []store.OrderBy, isEnd bool) *store.Cursor {
+// AggregationQueryFromProto converts a StructuredAggregationQuery proto and its
+// parent path into a store.AggregationQuery.
+func AggregationQueryFromProto(parent string, saq *firestorev1.StructuredAggregationQuery) (*store.AggregationQuery, error) {
+	if saq == nil {
+		return nil, status.Error(codes.InvalidArgument, "structured_aggregation_query is required")
+	}
+	sq := saq.GetStructuredQuery()
+	if sq == nil {
+		return nil, status.Error(codes.InvalidArgument, "structured_aggregation_query.structured_query is required")
+	}
+
+	base, err := QueryFromStructuredQuery(parent, sq, 0, "")
+	if err != nil {
+		return nil, err
+	}
+
+	aggs := saq.GetAggregations()
+	if len(aggs) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "at least one aggregation is required")
+	}
+
+	storeAggs := make([]store.Aggregation, len(aggs))
+	for i, a := range aggs {
+		alias := a.GetAlias()
+		if alias == "" {
+			alias = fmt.Sprintf("field_%d", i)
+		}
+		switch op := a.GetOperator().(type) {
+		case *firestorev1.StructuredAggregationQuery_Aggregation_Count_:
+			_ = op
+			storeAggs[i] = store.Aggregation{Op: store.AggregationCount, Alias: alias}
+		case *firestorev1.StructuredAggregationQuery_Aggregation_Sum_:
+			storeAggs[i] = store.Aggregation{Op: store.AggregationSum, Field: op.Sum.GetField().GetFieldPath(), Alias: alias}
+		case *firestorev1.StructuredAggregationQuery_Aggregation_Avg_:
+			storeAggs[i] = store.Aggregation{Op: store.AggregationAvg, Field: op.Avg.GetField().GetFieldPath(), Alias: alias}
+		default:
+			return nil, status.Errorf(codes.Unimplemented, "aggregation operator not supported")
+		}
+	}
+
+	return &store.AggregationQuery{Base: base, Aggregations: storeAggs}, nil
+}
+
+func protoCursor(c *firestorev1.Cursor, isEnd bool) *store.Cursor {
 	vals := c.GetValues()
 	fvs := make([]store.FilterValue, len(vals))
 	for i, v := range vals {
@@ -168,6 +232,44 @@ func protoCursor(c *firestorev1.Cursor, orders []store.OrderBy, isEnd bool) *sto
 		Values: fvs,
 		Before: c.GetBefore(),
 		IsEnd:  isEnd,
+	}
+}
+
+// lookupNestedField traverses dot-notation field paths through Firestore
+// MapValue chains, mirroring how the SQL layer descends "fields → mapValue.fields".
+// Returns (value, true) on success, (_, false) when any segment is missing or a
+// non-map intermediate is encountered.
+func lookupNestedField(fields map[string]*firestorev1.Value, fp string) (*firestorev1.Value, bool) {
+	if fp == "" {
+		return nil, false
+	}
+	// Split lazily on '.' so we don't allocate a slice for the common case.
+	for {
+		idx := -1
+		for i := 0; i < len(fp); i++ {
+			if fp[i] == '.' {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			v, ok := fields[fp]
+			if !ok || v == nil {
+				return nil, false
+			}
+			return v, true
+		}
+		head := fp[:idx]
+		fp = fp[idx+1:]
+		v, ok := fields[head]
+		if !ok || v == nil {
+			return nil, false
+		}
+		mv := v.GetMapValue()
+		if mv == nil {
+			return nil, false
+		}
+		fields = mv.GetFields()
 	}
 }
 
@@ -188,16 +290,13 @@ func MatchesFilter(doc *firestorev1.Document, f *store.CompositeFilter) bool {
 }
 
 func matchFieldFilter(fields map[string]*firestorev1.Value, ff store.FieldFilter) bool {
-	v, ok := fields[ff.Field]
+	v, ok := lookupNestedField(fields, ff.Field)
 
-	// Field is absent.
+	// Firestore semantics: a document missing the filtered field is excluded
+	// from EVERY predicate, including != and not-in. Mirrors what the SQL
+	// layer does (NULL comparisons return NULL → row excluded).
 	if !ok {
-		switch ff.Op {
-		case store.FilterOpNotEqual, store.FilterOpNotIn:
-			return true
-		default:
-			return false
-		}
+		return false
 	}
 
 	docVal := FilterValueFromProto(v)
@@ -277,6 +376,10 @@ func filterValuesEqual(a, b store.FilterValue) bool {
 		return a.DoubleVal == b.DoubleVal
 	case store.FilterValueString:
 		return a.StrVal == b.StrVal
+	case store.FilterValueJSON:
+		// Both sides are protojson blobs; compare as strings (codec always
+		// produces deterministic output for the same proto value).
+		return a.StrVal == b.StrVal
 	case store.FilterValueTime:
 		return a.TimeVal.Equal(b.TimeVal)
 	}
@@ -286,6 +389,18 @@ func filterValuesEqual(a, b store.FilterValue) bool {
 // filterValuesCmp returns -1, 0, or +1 comparing a to b.
 // Only meaningful for scalar types; returns 0 for unknowns.
 func filterValuesCmp(a, b store.FilterValue) int {
+	// int64 ↔ int64: compare as int64 to preserve precision for values > 2^53.
+	if a.Kind == store.FilterValueInt && b.Kind == store.FilterValueInt {
+		switch {
+		case a.IntVal < b.IntVal:
+			return -1
+		case a.IntVal > b.IntVal:
+			return 1
+		default:
+			return 0
+		}
+	}
+	// Otherwise fall back to float64 for cross-type / double compares.
 	toFloat := func(v store.FilterValue) (float64, bool) {
 		switch v.Kind {
 		case store.FilterValueInt:

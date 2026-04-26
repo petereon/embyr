@@ -19,9 +19,11 @@ type Config struct {
 
 // ServerConfig controls the gRPC and REST listener ports and optional TLS.
 type ServerConfig struct {
-	GRPCPort int       `mapstructure:"grpc_port"`
-	RESTPort int       `mapstructure:"rest_port"`
-	TLS      TLSConfig `mapstructure:"tls"`
+	GRPCPort       int       `mapstructure:"grpc_port"`
+	RESTPort       int       `mapstructure:"rest_port"`
+	TLS            TLSConfig `mapstructure:"tls"`
+	// AllowedOrigins lists CORS origins. Empty slice = allow all (dev default).
+	AllowedOrigins []string  `mapstructure:"allowed_origins"`
 }
 
 // TLSConfig holds paths to the server certificate and private key.
@@ -124,5 +126,28 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// Validate checks semantic constraints that viper/mapstructure cannot enforce.
+func (c *Config) Validate() error {
+	if c.Server.GRPCPort < 1 || c.Server.GRPCPort > 65535 {
+		return fmt.Errorf("config: server.grpc_port %d out of range [1,65535]", c.Server.GRPCPort)
+	}
+	if c.Server.RESTPort < 1 || c.Server.RESTPort > 65535 {
+		return fmt.Errorf("config: server.rest_port %d out of range [1,65535]", c.Server.RESTPort)
+	}
+	if c.Server.GRPCPort == c.Server.RESTPort {
+		return fmt.Errorf("config: server.grpc_port and server.rest_port must differ (both %d)", c.Server.GRPCPort)
+	}
+	if c.Transactions.TTL <= 0 {
+		return fmt.Errorf("config: transactions.ttl must be positive, got %s", c.Transactions.TTL)
+	}
+	if c.Transactions.SweepInterval <= 0 {
+		return fmt.Errorf("config: transactions.sweep_interval must be positive, got %s", c.Transactions.SweepInterval)
+	}
+	return nil
 }

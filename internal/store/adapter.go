@@ -70,9 +70,18 @@ type StorageAdapter interface {
 	// SweepExpiredTransactions deletes transaction records whose expires_at is in the past.
 	SweepExpiredTransactions(ctx context.Context) (deleted int, err error)
 
+	// RunAggregationQuery executes an aggregation query and returns one result
+	// value per Aggregation in q.Aggregations, keyed by Aggregation.Alias.
+	RunAggregationQuery(ctx context.Context, q *AggregationQuery) (map[string]AggregateValue, error)
+
+	// ListCollectionIds returns the distinct collection IDs of immediate child
+	// collections of the document at parent. pageSize=0 uses a server default.
+	// pageToken="" starts from the first page.
+	ListCollectionIds(ctx context.Context, parent string, pageSize int32, pageToken string) (collectionIDs []string, nextPageToken string, err error)
+
 	// Subscribe returns a channel that receives DocChange events for every
-	// committed write to this database. The caller must invoke the returned
-	// cancel function when it no longer needs the subscription to free resources.
+	// committed write to this database. The subscription lives until ctx is
+	// cancelled or the returned cancel function is called, whichever comes first.
 	// Multiple concurrent subscribers are supported; each receives all changes.
-	Subscribe() (<-chan DocChange, func())
+	Subscribe(ctx context.Context) (<-chan DocChange, func())
 }

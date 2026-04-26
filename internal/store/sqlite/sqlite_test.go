@@ -315,7 +315,7 @@ func TestSQLiteAdapter_CreateDocument_InvalidPath(t *testing.T) {
 
 func TestSubscribe_ReceivesChange(t *testing.T) {
 	a := newTestAdapter(t)
-	ch, cancel := a.Subscribe()
+	ch, cancel := a.Subscribe(context.Background())
 	defer cancel()
 
 	_, err := a.CreateDocument(context.Background(), &store.Document{
@@ -389,6 +389,103 @@ func TestQueryDocuments_IntFilter(t *testing.T) {
 	page, err := a.QueryDocuments(ctx, q)
 	require.NoError(t, err)
 	require.Len(t, page.Documents, 2)
+}
+
+// TestQueryDocuments_LargeInt64Filter verifies that integers > 2^53 are compared
+// correctly without float64 precision loss. 2^53 and 2^53+1 both round to the
+// same float64 (2^53) — a CAST AS REAL filter would incorrectly match both.
+func TestQueryDocuments_LargeInt64Filter(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	// 2^53 = 9007199254740992 (exactly representable as float64)
+	// 2^53+1 = 9007199254740993 (rounds to 2^53 in float64 — indistinguishable)
+	const exact = int64(1 << 53)
+	const nextInt = exact + 1
+	mustCreate(t, a, "projects/p/databases/d/documents/large/a",
+		fmt.Sprintf(`{"fields":{"n":{"integerValue":"%d"}}}`, exact))
+	mustCreate(t, a, "projects/p/databases/d/documents/large/b",
+		fmt.Sprintf(`{"fields":{"n":{"integerValue":"%d"}}}`, nextInt))
+
+	q := &store.Query{
+		Parent:       "projects/p/databases/d/documents",
+		CollectionID: "large",
+		Filter: &store.CompositeFilter{Filters: []store.FieldFilter{
+			{Field: "n", Op: store.FilterOpEqual,
+				Value: store.FilterValue{Kind: store.FilterValueInt, IntVal: exact}},
+		}},
+		PageSize: 100,
+	}
+	page, err := a.QueryDocuments(ctx, q)
+	require.NoError(t, err)
+	require.Len(t, page.Documents, 1, "only doc/a (n=%d) should match; doc/b (n=%d) must not", exact, nextInt)
+}
+
+func TestQueryDocuments_OrderByInteger_NumericSort(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	mustCreate(t, a, "projects/p/databases/d/documents/things/nine",
+		`{"fields":{"votes":{"integerValue":"9"}}}`)
+	mustCreate(t, a, "projects/p/databases/d/documents/things/ten",
+		`{"fields":{"votes":{"integerValue":"10"}}}`)
+	mustCreate(t, a, "projects/p/databases/d/documents/things/one",
+		`{"fields":{"votes":{"integerValue":"1"}}}`)
+
+	q := &store.Query{
+		Parent:       "projects/p/databases/d/documents",
+		CollectionID: "things",
+		OrderBy:      []store.OrderBy{{Field: "votes", Direction: store.DirectionAsc}},
+		PageSize:     100,
+	}
+	page, err := a.QueryDocuments(ctx, q)
+	require.NoError(t, err)
+	require.Len(t, page.Documents, 3)
+	// Numeric order: 1, 9, 10 — NOT lexicographic "1", "10", "9"
+	assert.Contains(t, page.Documents[0].Path, "one")
+	assert.Contains(t, page.Documents[1].Path, "nine")
+	assert.Contains(t, page.Documents[2].Path, "ten")
+}
+
+func TestQueryDocuments_InFilter_EmptyArray(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	mustCreate(t, a, "projects/p/databases/d/documents/things/x",
+		`{"fields":{"score":{"integerValue":"5"}}}`)
+
+	q := &store.Query{
+		Parent:       "projects/p/databases/d/documents",
+		CollectionID: "things",
+		Filter: &store.CompositeFilter{Filters: []store.FieldFilter{
+			{Field: "score", Op: store.FilterOpIn,
+				Value: store.FilterValue{Kind: store.FilterValueArray, ArrayVals: nil}},
+		}},
+		PageSize: 100,
+	}
+	// Empty IN() is either an error or returns no results — must not panic/SQL error.
+	page, err := a.QueryDocuments(ctx, q)
+	if err == nil {
+		assert.Empty(t, page.Documents)
+	}
+}
+
+func TestQueryDocuments_MaliciousFieldPath_Rejected(t *testing.T) {
+	a := newTestAdapter(t)
+	ctx := context.Background()
+
+	q := &store.Query{
+		Parent:       "projects/p/databases/d/documents",
+		CollectionID: "items",
+		Filter: &store.CompositeFilter{Filters: []store.FieldFilter{
+			// Single-quote in field name would break json_extract SQL string literal.
+			{Field: "evil') UNION SELECT 1--", Op: store.FilterOpEqual,
+				Value: store.FilterValue{Kind: store.FilterValueString, StrVal: "x"}},
+		}},
+		PageSize: 100,
+	}
+	_, err := a.QueryDocuments(ctx, q)
+	require.Error(t, err, "malicious field path must be rejected")
 }
 
 func TestBeginCommitTransaction(t *testing.T) {

@@ -12,7 +12,8 @@ const (
 	FilterValueDouble
 	FilterValueString
 	FilterValueTime
-	FilterValueArray  // used only in IN / array-contains-any operands
+	FilterValueArray // used only in IN / array-contains-any operands
+	FilterValueJSON  // raw protojson for map/array element comparison; StrVal holds the JSON
 )
 
 // FilterValue is a typed scalar or array value for query filter predicates.
@@ -86,4 +87,36 @@ type Query struct {
 	EndCursor    *Cursor
 	PageToken    string
 	PageSize     int32
+}
+
+// AggregationOp identifies an aggregation function.
+type AggregationOp int8
+
+const (
+	AggregationCount AggregationOp = iota
+	AggregationSum
+	AggregationAvg
+)
+
+// Aggregation describes one aggregate column in a RunAggregationQuery.
+type Aggregation struct {
+	Op    AggregationOp
+	Field string // field path; empty for COUNT
+	Alias string // key in the response AggregateFields map
+}
+
+// AggregationQuery is a base query plus one or more aggregate operations.
+type AggregationQuery struct {
+	Base         *Query
+	Aggregations []Aggregation
+}
+
+// AggregateValue is the result of a single aggregation.
+// Exactly one of IsNull, IsInt, IsFloat is true.
+type AggregateValue struct {
+	IsNull  bool
+	IsInt   bool
+	IntVal  int64
+	IsFloat bool
+	FloatVal float64
 }

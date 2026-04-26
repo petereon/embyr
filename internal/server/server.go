@@ -18,11 +18,13 @@ import (
 	"github.com/petereon/firstyr/internal/webchannel"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	"github.com/rs/cors"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -37,6 +39,7 @@ type Server struct {
 	restMux    *http.ServeMux
 	grpcWebSrv *grpcweb.WrappedGrpcServer
 	fs         *firestoreServer
+	wcMgr      *webchannel.Manager
 }
 
 // New creates a Server wired to db. It does not start listening.
@@ -57,14 +60,6 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 	grpcSrv := grpc.NewServer(opts...)
 	reg := listen.NewRegistry()
 	fs := &firestoreServer{db: db, log: log, registry: reg}
-	// Start feeding the registry from the adapter's Subscribe channel.
-	go func() {
-		ch, cancel := db.Subscribe()
-		defer cancel()
-		for c := range ch {
-			reg.Dispatch(c)
-		}
-	}()
 	firestorev1.RegisterFirestoreServer(grpcSrv, fs)
 	reflection.Register(grpcSrv)
 
@@ -107,6 +102,10 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 			serveBatchGetDocuments(w, r, fs)
 			return
 		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":runAggregationQuery") {
+			serveRunAggregationQuery(w, r, fs)
+			return
+		}
 		gwMux.ServeHTTP(w, r)
 	}))
 
@@ -118,6 +117,7 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 		restMux:    mux,
 		grpcWebSrv: grpcWebSrv,
 		fs:         fs,
+		wcMgr:      wcMgr,
 	}, nil
 }
 
@@ -127,30 +127,65 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("server: gRPC listen: %w", err)
 	}
+	// If REST listener allocation fails, close the gRPC listener so the port
+	// is released immediately rather than relying on the GC finalizer.
 	restLis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.cfg.Server.RESTPort))
 	if err != nil {
+		_ = grpcLis.Close()
 		return fmt.Errorf("server: REST listen: %w", err)
 	}
 
-	// combinedHandler routes gRPC-Web requests (application/grpc-web+proto content-type)
-	// to the gRPC-Web wrapper, and everything else to the grpc-gateway REST mux.
-	// WriteTimeout is 0 so long-running gRPC-Web streams are not killed prematurely;
-	// individual RPCs rely on gRPC deadlines for their own timeouts.
+	// timedRestMux wraps the REST gateway with a 30s write timeout so slow-read
+	// clients cannot hold REST connections open indefinitely. gRPC-Web and
+	// BrowserChannel requests bypass this and use the server's WriteTimeout:0.
+	timedRestMux := http.TimeoutHandler(s.restMux, 30*time.Second, "gateway timeout")
+	// combinedHandler routes streaming requests (gRPC-Web, BrowserChannel) to
+	// their handlers without a write deadline, and all other REST requests
+	// through the timed REST mux to enforce a 30s response deadline.
 	combinedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.grpcWebSrv.IsGrpcWebRequest(r) || s.grpcWebSrv.IsAcceptableGrpcCorsRequest(r) {
 			s.grpcWebSrv.ServeHTTP(w, r)
 			return
 		}
-		s.restMux.ServeHTTP(w, r)
+		// BrowserChannel paths need chunked HTTP streaming — bypass the timeout wrapper.
+		if strings.HasSuffix(r.URL.Path, "/channel") {
+			s.restMux.ServeHTTP(w, r)
+			return
+		}
+		timedRestMux.ServeHTTP(w, r)
 	})
+	// corsHandler enforces CORS. AllowedOrigins=[] (default) allows any origin
+	// so the Firebase JS SDK works in local development; set allowed_origins in
+	// config for network-exposed deployments to restrict access.
+	corsOpts := cors.Options{
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"*"},
+		AllowCredentials: true,
+	}
+	if len(s.cfg.Server.AllowedOrigins) > 0 {
+		corsOpts.AllowedOrigins = s.cfg.Server.AllowedOrigins
+	} else {
+		corsOpts.AllowOriginFunc = func(string) bool { return true }
+	}
+	corsHandler := cors.New(corsOpts).Handler(combinedHandler)
+
 	restSrv := &http.Server{
-		Handler:           combinedHandler,
+		Handler:           corsHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0, // disabled: gRPC-Web streams can be long-lived
 	}
 
 	eg, egCtx := errgroup.WithContext(ctx)
+	// Feed registry from adapter subscription; tied to egCtx so it stops on shutdown.
+	eg.Go(func() error {
+		ch, cancel := s.db.Subscribe(egCtx)
+		defer cancel()
+		for c := range ch {
+			s.fs.registry.Dispatch(c)
+		}
+		return nil
+	})
 	eg.Go(func() error { return s.grpcServer.Serve(grpcLis) })
 	eg.Go(func() error {
 		if err := restSrv.Serve(restLis); err != nil && err != http.ErrServerClosed {
@@ -158,7 +193,11 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return nil
 	})
-	sweepInterval := 30 * time.Second
+	// Honor the configured sweep interval (default 30s when not set).
+	sweepInterval := s.cfg.Transactions.SweepInterval
+	if sweepInterval <= 0 {
+		sweepInterval = 30 * time.Second
+	}
 	eg.Go(func() error {
 		ticker := time.NewTicker(sweepInterval)
 		defer ticker.Stop()
@@ -178,6 +217,10 @@ func (s *Server) Run(ctx context.Context) error {
 	})
 	eg.Go(func() error {
 		<-egCtx.Done()
+		// Cancel any active BrowserChannel sessions so their gRPC handler
+		// goroutines (parented on context.Background) exit cleanly instead of
+		// outliving the HTTP server.
+		s.wcMgr.Shutdown()
 		s.grpcServer.GracefulStop()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -240,8 +283,10 @@ func serveRunQuery(w http.ResponseWriter, r *http.Request, fs *firestoreServer) 
 			http.Error(w, rpcErr.Error(), grpcCodeToHTTP(code))
 			return
 		}
-		// Body already started; close the array and let the client deal with it.
-		w.Write([]byte("]"))
+		// Body already started; append an error element so the client can detect failure.
+		grpcCode := status.Code(rpcErr)
+		fmt.Fprintf(w, `,{"error":{"code":%d,"message":%q,"status":"%s"}}]`,
+			grpcCodeToHTTP(grpcCode), rpcErr.Error(), grpcCode.String())
 		return
 	}
 
@@ -251,6 +296,68 @@ func serveRunQuery(w http.ResponseWriter, r *http.Request, fs *firestoreServer) 
 	}
 	w.Write([]byte("]"))
 }
+
+// serveRunAggregationQuery handles POST …/:runAggregationQuery requests.
+// grpc-gateway emits NDJSON; the Lite SDK calls JSON.parse() and expects a
+// single JSON array, so we intercept, call RunAggregationQuery directly, and
+// return [<response>].
+func serveRunAggregationQuery(w http.ResponseWriter, r *http.Request, fs *firestoreServer) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	parent := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/"), ":runAggregationQuery")
+
+	req := &firestorev1.RunAggregationQueryRequest{}
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(body, req); err != nil {
+		http.Error(w, "decode request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Parent = parent
+
+	marshal := protojson.MarshalOptions{EmitUnpopulated: false}
+	var result []byte
+
+	streamer := &aggQueryStreamer{
+		ctx: r.Context(),
+		onSend: func(resp *firestorev1.RunAggregationQueryResponse) {
+			result, _ = marshal.Marshal(resp)
+		},
+	}
+
+	if rpcErr := fs.RunAggregationQuery(req, streamer); rpcErr != nil {
+		code := status.Code(rpcErr)
+		http.Error(w, rpcErr.Error(), grpcCodeToHTTP(code))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if result == nil {
+		w.Write([]byte("[]"))
+		return
+	}
+	w.Write([]byte("["))
+	w.Write(result)
+	w.Write([]byte("]"))
+}
+
+type aggQueryStreamer struct {
+	ctx    context.Context
+	onSend func(*firestorev1.RunAggregationQueryResponse)
+}
+
+func (s *aggQueryStreamer) Send(r *firestorev1.RunAggregationQueryResponse) error {
+	s.onSend(r)
+	return nil
+}
+func (s *aggQueryStreamer) SetHeader(md metadata.MD) error  { return nil }
+func (s *aggQueryStreamer) SendHeader(md metadata.MD) error { return nil }
+func (s *aggQueryStreamer) SetTrailer(metadata.MD)          {}
+func (s *aggQueryStreamer) Context() context.Context        { return s.ctx }
+func (s *aggQueryStreamer) SendMsg(m any) error             { return nil }
+func (s *aggQueryStreamer) RecvMsg(m any) error             { return nil }
 
 func grpcCodeToHTTP(c codes.Code) int {
 	switch c {

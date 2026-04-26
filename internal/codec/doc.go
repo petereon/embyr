@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
@@ -16,50 +15,31 @@ import (
 // documentIDChars is the alphabet for generated document IDs.
 const documentIDChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-// NewDocumentID generates a 20-character random Firestore-style document ID.
-func NewDocumentID() string {
-	b := make([]byte, 20)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		panic(fmt.Sprintf("codec: read random bytes: %v", err))
+// NewDocumentID generates a 20-character random alphanumeric Firestore-style document ID.
+// Uses rejection sampling to avoid modulo bias: bytes >= 248 are discarded.
+func NewDocumentID() (string, error) {
+	id := make([]byte, 0, 20)
+	buf := make([]byte, 32)
+	for len(id) < 20 {
+		if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+			return "", fmt.Errorf("codec: read random bytes: %w", err)
+		}
+		for _, v := range buf {
+			if v < 248 { // reject values that would bias chars 0-7
+				id = append(id, documentIDChars[v%62])
+				if len(id) == 20 {
+					break
+				}
+			}
+		}
 	}
-	for i := range b {
-		b[i] = documentIDChars[b[i]%62]
-	}
-	return string(b)
+	return string(id), nil
 }
 
 // ParsePath extracts the immediate collection name and parent path from a full
-// Firestore document path.
-//
-// Example:
-//
-//	ParsePath("projects/p/databases/d/documents/users/alice")
-//	→ collection="users", parent="projects/p/databases/d/documents"
-//
-//	ParsePath("projects/p/databases/d/documents/users/alice/orders/123")
-//	→ collection="orders", parent="projects/p/databases/d/documents/users/alice"
+// Firestore document path. Delegates to store.ParsePath — single canonical implementation.
 func ParsePath(path string) (collection, parent string) {
-	parts := strings.Split(path, "/")
-	docsIdx := -1
-	for i, p := range parts {
-		if p == "documents" {
-			docsIdx = i
-			break
-		}
-	}
-	if docsIdx < 0 {
-		return "", ""
-	}
-	relative := parts[docsIdx+1:]
-	if len(relative) < 2 || len(relative)%2 != 0 {
-		return "", ""
-	}
-	collection = relative[len(relative)-2]
-	parentParts := make([]string, 0, docsIdx+1+len(relative)-2)
-	parentParts = append(parentParts, parts[:docsIdx+1]...)
-	parentParts = append(parentParts, relative[:len(relative)-2]...)
-	parent = strings.Join(parentParts, "/")
-	return collection, parent
+	return store.ParsePath(path)
 }
 
 // BuildPath constructs a full Firestore document path from its components.

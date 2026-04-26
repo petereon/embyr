@@ -75,6 +75,20 @@ type Adapter struct {
 	subsMu  sync.RWMutex
 	subs    map[uint64]chan store.DocChange
 	subNext uint64
+	// txTTL is the duration used for new Firestore transactions' expires_at.
+	// SetTransactionTTL allows operators to override the 60s default via config.
+	txTTL time.Duration
+}
+
+const defaultTransactionTTL = 60 * time.Second
+
+// SetTransactionTTL configures the lifetime for new Firestore transactions.
+// A zero or negative value reverts to the default (60s).
+func (a *Adapter) SetTransactionTTL(d time.Duration) {
+	if d <= 0 {
+		d = defaultTransactionTTL
+	}
+	a.txTTL = d
 }
 
 // New opens (or creates) a SQLite database at path and returns a ready Adapter.
@@ -83,6 +97,9 @@ func New(path, migrationsPath string) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}
+	// SQLite supports one writer at a time. Using a single open connection
+	// ensures the driver never races on write-lock acquisition.
+	db.SetMaxOpenConns(1)
 	// WAL mode enables concurrent reads with writes and is required for listener hooks.
 	// SQLite PRAGMA returns the resulting mode — must verify it actually switched to wal,
 	// since a locked database may silently stay in the previous journal mode.
@@ -95,7 +112,13 @@ func New(path, migrationsPath string) (*Adapter, error) {
 		db.Close()
 		return nil, fmt.Errorf("sqlite: enable WAL: got mode %q, want \"wal\"", mode)
 	}
-	return &Adapter{rawDB: db, db: db, migrationsPath: migrationsPath}, nil
+	// Retry up to 5 s on SQLITE_BUSY instead of failing immediately when a
+	// concurrent writer holds the write lock.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("sqlite: set busy_timeout: %w", err)
+	}
+	return &Adapter{rawDB: db, db: db, migrationsPath: migrationsPath, txTTL: defaultTransactionTTL}, nil
 }
 
 // Ping verifies the database connection is alive.
@@ -140,9 +163,11 @@ func (a *Adapter) notifySubscribers(c store.DocChange) {
 }
 
 // Subscribe returns a channel that receives DocChange events for every
-// committed write. The returned cancel function unregisters the subscriber
-// and closes the channel.
-func (a *Adapter) Subscribe() (<-chan store.DocChange, func()) {
+// committed write. The subscription ends when ctx is cancelled or the returned
+// cancel function is called, whichever comes first. The ctx-watcher goroutine
+// exits promptly on either trigger so that callers with long-lived parent ctxs
+// do not accumulate parked goroutines per Subscribe/cancel cycle.
+func (a *Adapter) Subscribe(ctx context.Context) (<-chan store.DocChange, func()) {
 	ch := make(chan store.DocChange, 64)
 	a.subsMu.Lock()
 	id := a.subNext
@@ -152,14 +177,27 @@ func (a *Adapter) Subscribe() (<-chan store.DocChange, func()) {
 	}
 	a.subs[id] = ch
 	a.subsMu.Unlock()
-	return ch, func() {
-		a.subsMu.Lock()
-		delete(a.subs, id)
-		a.subsMu.Unlock()
-		close(ch)
-		for range ch {
-		}
+	done := make(chan struct{})
+	var once sync.Once
+	teardown := func() {
+		once.Do(func() {
+			a.subsMu.Lock()
+			delete(a.subs, id)
+			a.subsMu.Unlock()
+			close(ch)
+			close(done)
+		})
 	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			teardown()
+		case <-done:
+			// Caller invoked teardown directly — exit promptly without waiting
+			// on parent ctx.
+		}
+	}()
+	return ch, teardown
 }
 
 // ─── Document CRUD ────────────────────────────────────────────────────────────
@@ -191,31 +229,9 @@ const (
 	sqlDeleteDoc = `DELETE FROM documents WHERE path = ?`
 )
 
-// sqliteParseCollection derives the collection name and parent path from a
-// Firestore document path. This duplicates codec.ParsePath to avoid an import
-// cycle (codec imports store; sqlite is a sub-package of store).
+// sqliteParseCollection is a thin wrapper around store.ParsePath.
 func sqliteParseCollection(path string) (collection, parent string) {
-	parts := strings.Split(path, "/")
-	docsIdx := -1
-	for i, p := range parts {
-		if p == "documents" {
-			docsIdx = i
-			break
-		}
-	}
-	if docsIdx < 0 {
-		return "", ""
-	}
-	relative := parts[docsIdx+1:]
-	if len(relative) < 2 || len(relative)%2 != 0 {
-		return "", ""
-	}
-	collection = relative[len(relative)-2]
-	parentParts := make([]string, 0, docsIdx+1+len(relative)-2)
-	parentParts = append(parentParts, parts[:docsIdx+1]...)
-	parentParts = append(parentParts, relative[:len(relative)-2]...)
-	parent = strings.Join(parentParts, "/")
-	return collection, parent
+	return store.ParsePath(path)
 }
 
 func scanDoc(row interface {
@@ -484,7 +500,9 @@ func sqliteScalarExpr(fieldPath string, fv store.FilterValue) (expr string, arg 
 	path := sqliteTypedPath(base, fv.Kind)
 	switch fv.Kind {
 	case store.FilterValueInt:
-		return fmt.Sprintf("CAST(json_extract(data,'%s') AS REAL)", path), float64(fv.IntVal)
+		// Use INTEGER cast and int64 binding to preserve precision for values > 2^53.
+		// CAST AS REAL + float64 would silently lose bits for large integers.
+		return fmt.Sprintf("CAST(json_extract(data,'%s') AS INTEGER)", path), fv.IntVal
 	case store.FilterValueDouble:
 		return fmt.Sprintf("CAST(json_extract(data,'%s') AS REAL)", path), fv.DoubleVal
 	case store.FilterValueBool:
@@ -500,6 +518,78 @@ func sqliteScalarExpr(fieldPath string, fv store.FilterValue) (expr string, arg 
 	}
 }
 
+// sqliteCursorOp returns the SQL comparison operator for a cursor position.
+// isEnd=false → start cursor; isEnd=true → end cursor.
+// before=true → startAt (inclusive) / endBefore (exclusive).
+// before=false → startAfter (exclusive) / endAt (inclusive).
+// isDesc=true flips the operator direction because ORDER BY DESC reverses row order.
+func sqliteCursorOp(isEnd, before, isDesc bool) string {
+	if !isEnd {
+		if before {
+			if isDesc {
+				return "<="
+			}
+			return ">="
+		}
+		if isDesc {
+			return "<"
+		}
+		return ">"
+	}
+	// end cursor
+	if before {
+		if isDesc {
+			return ">"
+		}
+		return "<"
+	}
+	if isDesc {
+		return ">="
+	}
+	return "<="
+}
+
+// sqliteCursorClause returns the SQL WHERE fragment and bound args for a cursor.
+// values[i] corresponds to orders[i]. Only the first matching pair is used for
+// single-field cursors; for multi-field cursors an OR-expanded equivalent is built.
+func sqliteCursorClause(cursor *store.Cursor, orders []store.OrderBy, args *[]interface{}) string {
+	n := len(cursor.Values)
+	if n > len(orders) {
+		n = len(orders)
+	}
+	if n == 0 {
+		return ""
+	}
+	// Single-field fast path.
+	if n == 1 {
+		expr, arg := sqliteScalarExpr(orders[0].Field, cursor.Values[0])
+		op := sqliteCursorOp(cursor.IsEnd, cursor.Before, orders[0].Direction == store.DirectionDesc)
+		*args = append(*args, arg)
+		return fmt.Sprintf("%s %s ?", expr, op)
+	}
+	// Multi-field: expand as (f0>v0) OR (f0=v0 AND f1>v1) OR …
+	// The strict operator is determined by the cursor inclusivity/direction.
+	var parts []string
+	for i := 0; i < n; i++ {
+		o := orders[i]
+		strictOp := sqliteCursorOp(cursor.IsEnd, cursor.Before, o.Direction == store.DirectionDesc)
+		var eqExprs []string
+		for j := 0; j < i; j++ {
+			eqExpr, eqArg := sqliteScalarExpr(orders[j].Field, cursor.Values[j])
+			*args = append(*args, eqArg)
+			eqExprs = append(eqExprs, fmt.Sprintf("%s = ?", eqExpr))
+		}
+		strictExpr, strictArg := sqliteScalarExpr(o.Field, cursor.Values[i])
+		*args = append(*args, strictArg)
+		term := fmt.Sprintf("%s %s ?", strictExpr, strictOp)
+		if len(eqExprs) > 0 {
+			term = "(" + strings.Join(eqExprs, " AND ") + " AND " + term + ")"
+		}
+		parts = append(parts, term)
+	}
+	return "(" + strings.Join(parts, " OR ") + ")"
+}
+
 // sqliteFilterClause builds a SQL WHERE clause fragment for a single FieldFilter.
 func sqliteFilterClause(f store.FieldFilter, args *[]interface{}) (string, error) {
 	if err := validateFieldPath(f.Field); err != nil {
@@ -509,6 +599,24 @@ func sqliteFilterClause(f store.FieldFilter, args *[]interface{}) (string, error
 	case store.FilterOpEqual, store.FilterOpNotEqual,
 		store.FilterOpLessThan, store.FilterOpLessThanOrEqual,
 		store.FilterOpGreaterThan, store.FilterOpGreaterThanOrEqual:
+		if f.Value.Kind == store.FilterValueNull {
+			base := sqliteFieldBase(f.Field)
+			// json_type returns SQL NULL for both JSON null AND missing path, so we
+			// check for the presence of the 'nullValue' key via json_each instead.
+			existsNull := fmt.Sprintf(
+				"EXISTS(SELECT 1 FROM json_each(json_extract(data,'%s')) WHERE key='nullValue')",
+				base)
+			if f.Op == store.FilterOpEqual {
+				// == null: field absent OR field explicitly null.
+				return fmt.Sprintf(
+					"(json_extract(data,'%s') IS NULL OR %s)",
+					base, existsNull), nil
+			}
+			// != null: field exists AND is not null type.
+			return fmt.Sprintf(
+				"(json_extract(data,'%s') IS NOT NULL AND NOT %s)",
+				base, existsNull), nil
+		}
 		expr, arg := sqliteScalarExpr(f.Field, f.Value)
 		*args = append(*args, arg)
 		opMap := map[store.FilterOp]string{
@@ -524,6 +632,13 @@ func sqliteFilterClause(f store.FieldFilter, args *[]interface{}) (string, error
 	case store.FilterOpArrayContains:
 		base := sqliteFieldBase(f.Field)
 		arrayPath := base + ".arrayValue.values"
+		if f.Value.Kind == store.FilterValueJSON {
+			// Map/complex value: compare full element JSON blob.
+			*args = append(*args, f.Value.StrVal)
+			return fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM json_each(json_extract(data,'%s')) AS e WHERE json(e.value) = json(?))",
+				arrayPath), nil
+		}
 		_, arg := sqliteScalarExpr(f.Field, f.Value)
 		typeKey := ""
 		switch f.Value.Kind {
@@ -540,6 +655,40 @@ func sqliteFilterClause(f store.FieldFilter, args *[]interface{}) (string, error
 		return fmt.Sprintf(
 			"EXISTS (SELECT 1 FROM json_each(json_extract(data,'%s')) AS e WHERE json_extract(e.value,'%s') = ?)",
 			arrayPath, typeKey), nil
+
+	case store.FilterOpArrayContainsAny:
+		base := sqliteFieldBase(f.Field)
+		arrayPath := base + ".arrayValue.values"
+		var orParts []string
+		for _, v := range f.Value.ArrayVals {
+			if v.Kind == store.FilterValueJSON {
+				*args = append(*args, v.StrVal)
+				orParts = append(orParts,
+					fmt.Sprintf("EXISTS (SELECT 1 FROM json_each(json_extract(data,'%s')) AS e WHERE json(e.value) = json(?))",
+						arrayPath))
+				continue
+			}
+			typeKey := ""
+			switch v.Kind {
+			case store.FilterValueString:
+				typeKey = "$.stringValue"
+			case store.FilterValueInt:
+				typeKey = "$.integerValue"
+			case store.FilterValueDouble:
+				typeKey = "$.doubleValue"
+			case store.FilterValueBool:
+				typeKey = "$.booleanValue"
+			}
+			_, arg := sqliteScalarExpr(f.Field, v)
+			*args = append(*args, arg)
+			orParts = append(orParts,
+				fmt.Sprintf("EXISTS (SELECT 1 FROM json_each(json_extract(data,'%s')) AS e WHERE json_extract(e.value,'%s') = ?)",
+					arrayPath, typeKey))
+		}
+		if len(orParts) == 0 {
+			return "0", nil // empty array → no match
+		}
+		return "(" + strings.Join(orParts, " OR ") + ")", nil
 
 	case store.FilterOpIn, store.FilterOpNotIn:
 		base := sqliteFieldBase(f.Field)
@@ -566,6 +715,8 @@ func sqliteFilterClause(f store.FieldFilter, args *[]interface{}) (string, error
 }
 
 // sqliteOrderExpr builds an ORDER BY expression for a single OrderBy clause.
+// Uses COALESCE over typed sub-fields so numeric fields sort correctly instead
+// of lexicographically on the raw Firestore Value JSON object.
 func sqliteOrderExpr(o store.OrderBy) (string, error) {
 	if o.Direction != store.DirectionAsc && o.Direction != store.DirectionDesc {
 		return "", status.Errorf(codes.InvalidArgument, "invalid order direction: %q", o.Direction)
@@ -574,7 +725,11 @@ func sqliteOrderExpr(o store.OrderBy) (string, error) {
 		return "", err
 	}
 	base := sqliteFieldBase(o.Field)
-	return fmt.Sprintf("json_extract(data,'%s') %s", base, string(o.Direction)), nil
+	dir := string(o.Direction)
+	expr := fmt.Sprintf(
+		"COALESCE(CAST(json_extract(data,'%s.integerValue') AS INTEGER), CAST(json_extract(data,'%s.doubleValue') AS REAL), json_extract(data,'%s.stringValue'), json_extract(data,'%s.timestampValue')) %s",
+		base, base, base, base, dir)
+	return expr, nil
 }
 
 // QueryDocuments executes a structured query and returns matching documents.
@@ -583,7 +738,11 @@ func (a *Adapter) QueryDocuments(ctx context.Context, q *store.Query) (*store.Li
 	if pageSize <= 0 {
 		pageSize = 300
 	}
-	offset := store.DecodePageToken(q.PageToken)
+	// Cursors replace offset-based pagination.
+	var offset int
+	if q.StartCursor == nil && q.EndCursor == nil {
+		offset = store.DecodePageToken(q.PageToken)
+	}
 	fetchSize := int(pageSize) + 1
 
 	var sb strings.Builder
@@ -603,6 +762,21 @@ func (a *Adapter) QueryDocuments(ctx context.Context, q *store.Query) (*store.Li
 			if err != nil {
 				return nil, err
 			}
+			sb.WriteString(" AND ")
+			sb.WriteString(clause)
+		}
+	}
+
+	if q.StartCursor != nil && len(q.OrderBy) > 0 {
+		clause := sqliteCursorClause(q.StartCursor, q.OrderBy, &args)
+		if clause != "" {
+			sb.WriteString(" AND ")
+			sb.WriteString(clause)
+		}
+	}
+	if q.EndCursor != nil && len(q.OrderBy) > 0 {
+		clause := sqliteCursorClause(q.EndCursor, q.OrderBy, &args)
+		if clause != "" {
 			sb.WriteString(" AND ")
 			sb.WriteString(clause)
 		}
@@ -655,20 +829,32 @@ func (a *Adapter) QueryDocuments(ctx context.Context, q *store.Query) (*store.Li
 // ─── Transaction support ──────────────────────────────────────────────────────
 
 // WithTransaction executes fn inside a SQL transaction. If fn returns an error
-// the transaction is rolled back; otherwise it is committed.
-// The transaction is passed via context so that concurrent calls on the same
+// or panics, the transaction is rolled back; otherwise it is committed. The
+// transaction is passed via context so that concurrent calls on the same
 // Adapter do not race on a shared field — each goroutine gets its own txCtx.
-func (a *Adapter) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
-	tx, err := a.rawDB.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite: begin tx: %w", err)
+//
+// The deferred rollback is critical: with MaxOpenConns=1, a panic that leaks
+// the *sql.Tx would deadlock every subsequent operation on the adapter.
+func (a *Adapter) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) (err error) {
+	tx, beginErr := a.rawDB.BeginTx(ctx, nil)
+	if beginErr != nil {
+		return fmt.Errorf("sqlite: begin tx: %w", beginErr)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	txCtx := context.WithValue(ctx, ctxTxKey{}, tx)
-	if err := fn(txCtx); err != nil {
-		_ = tx.Rollback()
+	if err = fn(txCtx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // newTxID generates a random 128-bit hex transaction identifier.
@@ -684,8 +870,12 @@ func (a *Adapter) BeginTransaction(ctx context.Context, readOnly bool) (string, 
 	_ = readOnly // reserved for future read-only enforcement
 	id := newTxID()
 	t := time.Now().UTC()
+	ttl := a.txTTL
+	if ttl <= 0 {
+		ttl = defaultTransactionTTL
+	}
 	now := t.Format(time.RFC3339Nano)
-	expires := t.Add(60 * time.Second).Format(time.RFC3339Nano)
+	expires := t.Add(ttl).Format(time.RFC3339Nano)
 	_, err := a.execer(ctx).ExecContext(ctx,
 		`INSERT INTO transactions (id, started_at, reads, expires_at) VALUES (?, ?, '{}', ?)`,
 		id, now, expires)
@@ -861,4 +1051,127 @@ func (a *Adapter) SweepExpiredTransactions(ctx context.Context) (int, error) {
 	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
+}
+
+// RunAggregationQuery executes aggregate SQL (COUNT/SUM/AVG) over the base query.
+func (a *Adapter) RunAggregationQuery(ctx context.Context, q *store.AggregationQuery) (map[string]store.AggregateValue, error) {
+	base := q.Base
+
+	// Build SELECT list.
+	selects := make([]string, len(q.Aggregations))
+	for i, agg := range q.Aggregations {
+		switch agg.Op {
+		case store.AggregationCount:
+			selects[i] = "COUNT(*)"
+		case store.AggregationSum:
+			if err := validateFieldPath(agg.Field); err != nil {
+				return nil, err
+			}
+			b := sqliteFieldBase(agg.Field)
+			selects[i] = fmt.Sprintf(
+				"SUM(COALESCE(CAST(json_extract(data,'%s.integerValue') AS INTEGER), CAST(json_extract(data,'%s.doubleValue') AS REAL)))",
+				b, b)
+		case store.AggregationAvg:
+			if err := validateFieldPath(agg.Field); err != nil {
+				return nil, err
+			}
+			b := sqliteFieldBase(agg.Field)
+			selects[i] = fmt.Sprintf(
+				"AVG(COALESCE(CAST(json_extract(data,'%s.integerValue') AS REAL), CAST(json_extract(data,'%s.doubleValue') AS REAL)))",
+				b, b)
+		default:
+			return nil, status.Errorf(codes.Unimplemented, "sqlite: unsupported aggregation op %d", agg.Op)
+		}
+	}
+
+	var sb strings.Builder
+	args := make([]interface{}, 0, 4)
+	sb.WriteString("SELECT ")
+	sb.WriteString(strings.Join(selects, ", "))
+	sb.WriteString(" FROM documents WHERE parent = ?")
+	args = append(args, base.Parent)
+
+	if base.CollectionID != "" {
+		sb.WriteString(" AND collection = ?")
+		args = append(args, base.CollectionID)
+	}
+	if base.Filter != nil {
+		for _, f := range base.Filter.Filters {
+			clause, err := sqliteFilterClause(f, &args)
+			if err != nil {
+				return nil, err
+			}
+			sb.WriteString(" AND ")
+			sb.WriteString(clause)
+		}
+	}
+
+	row := a.execer(ctx).QueryRowContext(ctx, sb.String(), args...)
+
+	scanDests := make([]interface{}, len(q.Aggregations))
+	rawVals := make([]sql.NullFloat64, len(q.Aggregations))
+	for i := range rawVals {
+		scanDests[i] = &rawVals[i]
+	}
+	if err := row.Scan(scanDests...); err != nil {
+		return nil, fmt.Errorf("sqlite: aggregation scan: %w", err)
+	}
+
+	result := make(map[string]store.AggregateValue, len(q.Aggregations))
+	for i, agg := range q.Aggregations {
+		nf := rawVals[i]
+		if !nf.Valid {
+			// COUNT(*) is never NULL. SUM on empty set returns 0 (Firestore spec).
+			// AVG on empty set returns null.
+			if agg.Op == store.AggregationSum {
+				result[agg.Alias] = store.AggregateValue{IsInt: true, IntVal: 0}
+			} else {
+				result[agg.Alias] = store.AggregateValue{IsNull: true}
+			}
+			continue
+		}
+		switch agg.Op {
+		case store.AggregationCount, store.AggregationSum:
+			result[agg.Alias] = store.AggregateValue{IsInt: true, IntVal: int64(nf.Float64)}
+		default:
+			result[agg.Alias] = store.AggregateValue{IsFloat: true, FloatVal: nf.Float64}
+		}
+	}
+	return result, nil
+}
+
+// ListCollectionIds returns distinct immediate child collection IDs under parent.
+func (a *Adapter) ListCollectionIds(ctx context.Context, parent string, pageSize int32, pageToken string) ([]string, string, error) {
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+	offset := store.DecodePageToken(pageToken)
+	fetchSize := int(pageSize) + 1
+
+	rows, err := a.execer(ctx).QueryContext(ctx,
+		`SELECT DISTINCT collection FROM documents WHERE parent = ? ORDER BY collection ASC LIMIT ? OFFSET ?`,
+		parent, fetchSize, offset)
+	if err != nil {
+		return nil, "", fmt.Errorf("sqlite: list collection ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, pageSize)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, "", fmt.Errorf("sqlite: scan collection id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("sqlite: list collection ids rows: %w", err)
+	}
+
+	var nextToken string
+	if len(ids) > int(pageSize) {
+		ids = ids[:pageSize]
+		nextToken = store.EncodePageToken(offset + int(pageSize))
+	}
+	return ids, nextToken, nil
 }

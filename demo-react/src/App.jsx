@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   collection,
   doc,
@@ -38,26 +38,74 @@ export default function App() {
     setOps(prev => [msg, ...prev].slice(0, 6));
   }
 
+  // Two-ref strategy for zero-gap, no-pending-target-removal listener swaps.
+  //
+  // Problem 1 — React cleanup order: cleanup of old effect runs BEFORE new
+  // effect body → removing listener in cleanup creates a zero-listener gap →
+  // SDK closes WebChannel → 13s reconnect backoff. Fix: return () => {} (no-op).
+  //
+  // Problem 2 — pending target removal: removing a target that hasn't received
+  // its first CURRENT ack can trigger an SDK stream reset. Fix: keep old listener
+  // alive until new listener fires its first snapshot (is CURRENT), then remove it.
+  // If another filter change fires before that snapshot, flush the pending removal
+  // immediately so we never accumulate more than 2 simultaneous listeners.
+  //
+  // genRef guards against stale snapshot callbacks updating state.
+  const cleanupRef     = useRef(null); // current active listener
+  const pendingRemRef  = useRef(null); // previous listener deferred until new is CURRENT
+  const genRef         = useRef(0);
+  const hasLoadedRef   = useRef(false);
+
   // ── Live query ────────────────────────────────────────────────────────────
   // Rebuilt whenever sort or filter changes.
   // Demonstrates: onSnapshot, orderBy, where (when category filter active)
   useEffect(() => {
-    setLoading(true);
+    if (!hasLoadedRef.current) setLoading(true);
     const constraints = [];
     if (filterCat !== 'all') constraints.push(where('category', '==', filterCat));
     constraints.push(orderBy(sortBy, 'desc'));
 
-    const unsub = onSnapshot(
+    const gen = ++genRef.current;
+    const toDefer = cleanupRef.current;
+
+    const newUnsub = onSnapshot(
       query(collection(db, COLL), ...constraints),
       snap => {
+        // New listener is CURRENT — safe to remove the previous one now.
+        if (pendingRemRef.current) {
+          pendingRemRef.current();
+          pendingRemRef.current = null;
+        }
+        // Ignore callbacks from superseded listeners.
+        if (gen !== genRef.current) return;
+        hasLoadedRef.current = true;
         setNotes(snap.docs.map(d => ({ id: d.id, ...d.data() })));
         setLoading(false);
         setSelected(new Set());
       },
-      err => { setError(err.message); setLoading(false); },
+      err => {
+        if (gen !== genRef.current) return;
+        setError(err.message);
+        setLoading(false);
+      },
     );
-    return unsub;
+
+    cleanupRef.current = newUnsub;
+    // Flush any listener that was already deferred (rapid successive changes),
+    // then defer the one we just replaced.
+    if (pendingRemRef.current) pendingRemRef.current();
+    pendingRemRef.current = toDefer;
+
+    return () => {};
   }, [sortBy, filterCat]);
+
+  // Unmount-only cleanup.
+  useEffect(() => {
+    return () => {
+      if (cleanupRef.current) cleanupRef.current();
+      if (pendingRemRef.current) pendingRemRef.current();
+    };
+  }, []);
 
   // ── addDoc + serverTimestamp ───────────────────────────────────────────────
   async function handleAdd(e) {

@@ -77,7 +77,7 @@ func TestFormatNoopChunk(t *testing.T) {
 	mgr := webchannel.NewManager()
 	sess := mgr.NewSession()
 
-	result := sess.FormatNoopChunk()
+	result := sess.FormatNoopChunk(42)
 
 	// Assert non-empty
 	require.NotEmpty(t, result)
@@ -106,4 +106,34 @@ func TestManager_GetAndRemove(t *testing.T) {
 	// Verify Get returns nil after removal
 	retrieved = mgr.Get(sess.ID)
 	require.Nil(t, retrieved)
+}
+
+// TestSession_NoopDoesNotAdvanceGlobalSeq verifies that FormatNoopChunk does
+// NOT advance the session-global seq counter. Noops are per-connection
+// keepalives; advancing the global counter breaks the logIdx = AID-1 mapping
+// (data chunk at log[0] must always have seq=2, log[1]→seq=3, etc.).
+func TestSession_NoopDoesNotAdvanceGlobalSeq(t *testing.T) {
+	mgr := webchannel.NewManager()
+	sess := mgr.NewSession()
+	sess.FormatConnectChunk() // initialises seq to 2
+
+	data1 := sess.FormatDataChunk(json.RawMessage(`{}`))
+	require.Contains(t, string(data1), `[2,`) // first data chunk must have seq=2
+
+	// Noops must NOT advance the global seq.
+	sess.FormatNoopChunk(2)
+	sess.FormatNoopChunk(2)
+
+	data2 := sess.FormatDataChunk(json.RawMessage(`{}`))
+	require.Contains(t, string(data2), `[3,`) // second data chunk must have seq=3, not 5
+}
+
+func TestSession_SeenRID_RetryDetection(t *testing.T) {
+	mgr := webchannel.NewManager()
+	sess := mgr.NewSession()
+
+	require.False(t, sess.SeenRID("2"), "first time RID=2 must not be seen")
+	require.False(t, sess.SeenRID("3"), "first time RID=3 must not be seen")
+	// Retry of a previous RID must be detected even after a newer RID was processed.
+	require.True(t, sess.SeenRID("2"), "retry of RID=2 after RID=3 must be detected")
 }

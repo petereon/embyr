@@ -90,6 +90,34 @@ func (m *Manager) Remove(id string) {
 	m.mu.Unlock()
 }
 
+// AnySessionID returns the ID of an arbitrary active session, or "" when the
+// manager is empty. Test-only helper for inspecting state.
+func (m *Manager) AnySessionID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id := range m.sessions {
+		return id
+	}
+	return ""
+}
+
+// Shutdown cancels every active session's bridge context so that gRPC handler
+// goroutines and pump goroutines exit. Used by the HTTP server during graceful
+// shutdown to avoid leaking goroutines that are parented on context.Background.
+func (m *Manager) Shutdown() {
+	m.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		if s.cancel != nil {
+			cancels = append(cancels, s.cancel)
+		}
+	}
+	m.mu.Unlock()
+	for _, c := range cancels {
+		c()
+	}
+}
+
 func newSessionID() string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
@@ -100,7 +128,7 @@ func newSessionID() string {
 type Session struct {
 	ID  string
 	mgr *Manager
-	seq atomic.Int64 // next message sequence number
+	seq atomic.Int64 // next data-message sequence number (NOT advanced by noops)
 	// message logs for fan-out replay to concurrent GET back-channels
 	listenLog *MsgLog
 	writeLog  *MsgLog
@@ -108,19 +136,27 @@ type Session struct {
 	bridge      *listenBridge
 	writeBridge *writeBridge
 	cancel      context.CancelFunc
-	// RID deduplication: BrowserChannel retries POSTs with same RID on timeout
-	lastRIDMu sync.Mutex
-	lastRID   string
+	// RID deduplication: BrowserChannel retries POSTs with same RID on timeout.
+	// seenRIDs holds the last ridWindowSize RIDs to detect retries across multiple hops.
+	ridMu    sync.Mutex
+	seenRIDs []string // ring buffer, newest at end
 }
+
+const ridWindowSize = 16
 
 // SeenRID returns true if rid was already processed, false and records it otherwise.
 func (s *Session) SeenRID(rid string) bool {
-	s.lastRIDMu.Lock()
-	defer s.lastRIDMu.Unlock()
-	if s.lastRID == rid {
-		return true
+	s.ridMu.Lock()
+	defer s.ridMu.Unlock()
+	for _, seen := range s.seenRIDs {
+		if seen == rid {
+			return true
+		}
 	}
-	s.lastRID = rid
+	s.seenRIDs = append(s.seenRIDs, rid)
+	if len(s.seenRIDs) > ridWindowSize {
+		s.seenRIDs = s.seenRIDs[len(s.seenRIDs)-ridWindowSize:]
+	}
 	return false
 }
 
@@ -172,12 +208,35 @@ func (s *Session) FormatDataChunk(data json.RawMessage) []byte {
 	return []byte(fmt.Sprintf("%d\n%s", len(b), b))
 }
 
-// FormatNoopChunk returns a keep-alive noop chunk.
-func (s *Session) FormatNoopChunk() []byte {
-	seq := s.seq.Add(1) - 1
+// FormatNoopChunk returns a keep-alive noop chunk using the provided per-connection
+// sequence number. Callers (back-channel handlers) maintain their own local
+// counters so that noops do not advance the session-global data seq.
+func (s *Session) FormatNoopChunk(seq int64) []byte {
 	msgs := []interface{}{
 		[]interface{}{seq, []interface{}{"noop"}},
 	}
 	b, _ := json.Marshal(msgs)
 	return []byte(fmt.Sprintf("%d\n%s", len(b), b))
+}
+
+// DataSeq returns the current session-global data sequence watermark.
+func (s *Session) DataSeq() int64 {
+	return s.seq.Load()
+}
+
+// GetListenBridge returns the Listen bridge for this session, or nil if it
+// isn't a Listen-channel session. Used by handlers to reject cross-channel
+// requests instead of nil-derefing.
+func (s *Session) GetListenBridge() *listenBridge { return s.bridge }
+
+// GetWriteBridge returns the Write bridge for this session, or nil if it
+// isn't a Write-channel session.
+func (s *Session) GetWriteBridge() *writeBridge { return s.writeBridge }
+
+// NextNoopSeq atomically claims the next session-global sequence number for a
+// noop chunk. Using the same counter as data chunks guarantees that no two
+// chunks in a session ever share a seq, regardless of which back-channel
+// connection emits them.
+func (s *Session) NextNoopSeq() int64 {
+	return s.seq.Add(1) - 1
 }

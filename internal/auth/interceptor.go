@@ -148,42 +148,79 @@ func googleStream(projectID string) grpc.StreamServerInterceptor {
 	}
 }
 
+// validateGoogleToken verifies a Bearer token against Google's tokeninfo
+// endpoint. Bearer tokens may be either:
+//   - a Firebase / OIDC ID token (JWT) — sent as `?id_token=…`, validated by
+//     audience matching the configured project ID.
+//   - an OAuth 2 access token (opaque) — sent as `?access_token=…`, accepted
+//     when tokeninfo returns 200 (the response does not carry the project ID,
+//     so further authorization is delegated to the application layer).
+//
+// Try id_token first; if Google rejects (HTTP 4xx), retry as access_token.
 func validateGoogleToken(ctx context.Context, projectID string) error {
 	token, err := bearerToken(ctx)
 	if err != nil {
 		return err
 	}
+
+	// Attempt 1: ID token validation.
+	if ok, info, idErr := googleTokenInfo(ctx, "id_token", token); idErr != nil {
+		return idErr
+	} else if ok {
+		// ID token responses must match the configured project ID.
+		if info.Audience != projectID && info.AZP != projectID && info.Aud != projectID {
+			return status.Error(codes.Unauthenticated, "token audience does not match project ID")
+		}
+		return nil
+	}
+
+	// Attempt 2: OAuth 2 access token. Google's tokeninfo response for access
+	// tokens does not include the project ID, so any 200 from Google means the
+	// token is currently valid; finer-grained authorization is the
+	// application's responsibility.
+	if ok, _, atErr := googleTokenInfo(ctx, "access_token", token); atErr != nil {
+		return atErr
+	} else if ok {
+		return nil
+	}
+	return status.Error(codes.Unauthenticated, "invalid google token")
+}
+
+// tokenInfo is the subset of Google's tokeninfo response we care about.
+// `aud` and `audience` are the same field with two spellings used by
+// different versions of the endpoint; `azp` is the OAuth client ID.
+type tokenInfo struct {
+	Audience string `json:"audience"`
+	Aud      string `json:"aud"`
+	AZP      string `json:"azp"`
+}
+
+// googleTokenInfo issues GET tokeninfo?<param>=<token>. Returns (true, info,
+// nil) on a 200 response, (false, _, nil) on a 4xx response (caller should
+// try the other parameter), and (false, _, err) on transport-level errors.
+func googleTokenInfo(ctx context.Context, param, token string) (bool, tokenInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		getTokenInfoURL()+"?id_token="+url.QueryEscape(token), nil)
+		getTokenInfoURL()+"?"+param+"="+url.QueryEscape(token), nil)
 	if err != nil {
-		return status.Errorf(codes.Internal, "google token request: %v", err)
+		return false, tokenInfo{}, status.Errorf(codes.Internal, "google token request: %v", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return status.Errorf(codes.Unauthenticated, "google token validation: %v", err)
+		return false, tokenInfo{}, status.Errorf(codes.Unauthenticated, "google token validation: %v", err)
 	}
-	defer func() {
-		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		resp.Body.Close()             //nolint:errcheck
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return status.Error(codes.Unauthenticated, "invalid google token")
-	}
+	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return status.Errorf(codes.Internal, "google token read body: %v", err)
+		return false, tokenInfo{}, status.Errorf(codes.Internal, "google token read body: %v", err)
 	}
-	var info struct {
-		Audience string `json:"audience"`
-		AZP      string `json:"azp"`
+	if resp.StatusCode != http.StatusOK {
+		return false, tokenInfo{}, nil
 	}
+	var info tokenInfo
 	if err := json.Unmarshal(body, &info); err != nil {
-		return status.Errorf(codes.Internal, "google token parse: %v", err)
+		return false, tokenInfo{}, status.Errorf(codes.Internal, "google token parse: %v", err)
 	}
-	if info.Audience != projectID && info.AZP != projectID {
-		return status.Error(codes.Unauthenticated, "token audience does not match project ID")
-	}
-	return nil
+	return true, info, nil
 }
 
 // ─── mtls ─────────────────────────────────────────────────────────────────────

@@ -52,7 +52,11 @@ func (s *firestoreServer) CreateDocument(ctx context.Context, req *firestorev1.C
 	}
 	docID := req.GetDocumentId()
 	if docID == "" {
-		docID = codec.NewDocumentID()
+		var err error
+		docID, err = codec.NewDocumentID()
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "generate document ID: %v", err)
+		}
 	}
 	// The grpc-gateway may append a trailing slash to the parent path variable when
 	// the ** wildcard in the URL pattern captures zero segments (e.g. top-level
@@ -201,25 +205,31 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 	// If a transaction ID is provided, delegate to CommitTransaction for OCC.
 	if txBytes := req.GetTransaction(); len(txBytes) > 0 {
 		txID := string(txBytes)
+		type writeKind int
+		const (
+			kindOp     writeKind = iota // real write op
+			kindVerify                  // VerifyMutation (precondition only, no op)
+		)
 		ops := make([]store.WriteOp, 0, len(req.GetWrites()))
+		kinds := make([]writeKind, 0, len(req.GetWrites()))
 		for _, w := range req.GetWrites() {
 			switch op := w.GetOperation().(type) {
 			case *firestorev1.Write_Update:
+				// Mask alone does not imply "must exist". updateDoc sends exists:true
+				// explicitly; setDoc({merge}) sends a mask with no precondition.
 				mode := store.WriteModeUpsert
-				if mask := w.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
-					mode = store.WriteModeUpdate
-				}
 				sd, err := codec.ProtoToStore(op.Update)
 				if err != nil {
 					return nil, status.Errorf(codes.Internal, "encode document: %v", err)
 				}
 				ops = append(ops, store.WriteOp{Type: store.WriteOpUpdate, Doc: sd, Mode: mode})
+				kinds = append(kinds, kindOp)
 			case *firestorev1.Write_Delete:
 				ops = append(ops, store.WriteOp{Type: store.WriteOpDelete, Path: op.Delete})
+				kinds = append(kinds, kindOp)
 			case nil:
-				// VerifyMutation: no operation, only a currentDocument precondition.
-				// OCC is enforced by CommitTransaction via the transaction's read set.
-				// Nothing to add to ops — just skip.
+				// VerifyMutation: precondition only, OCC enforced by transaction read set.
+				kinds = append(kinds, kindVerify)
 			default:
 				return nil, status.Error(codes.Unimplemented, "write operation type not supported in transaction commit")
 			}
@@ -228,18 +238,31 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 		if err != nil {
 			return nil, err
 		}
-		wrs := make([]*firestorev1.WriteResult, len(result.WriteResults))
-		for i, wr := range result.WriteResults {
-			wrs[i] = &firestorev1.WriteResult{UpdateTime: timestamppb.New(wr.UpdatedAt)}
+		// One WriteResult per Write (Firestore spec). VerifyMutation writes get an
+		// empty WriteResult with the commit time; real writes get their UpdatedAt.
+		commitTs := timestamppb.New(result.CommitTime)
+		wrs := make([]*firestorev1.WriteResult, 0, len(kinds))
+		opIdx := 0
+		for _, k := range kinds {
+			if k == kindVerify {
+				wrs = append(wrs, &firestorev1.WriteResult{UpdateTime: commitTs})
+			} else {
+				wrs = append(wrs, &firestorev1.WriteResult{UpdateTime: timestamppb.New(result.WriteResults[opIdx].UpdatedAt)})
+				opIdx++
+			}
 		}
 		return &firestorev1.CommitResponse{
 			WriteResults: wrs,
-			CommitTime:   timestamppb.New(result.CommitTime),
+			CommitTime:   commitTs,
 		}, nil
 	}
 
-	results, err := s.applyWriteBatch(ctx, req.GetWrites(), now)
-	if err != nil {
+	var results []*firestorev1.WriteResult
+	if err := s.db.WithTransaction(ctx, func(txCtx context.Context) error {
+		var batchErr error
+		results, batchErr = s.applyWriteBatch(txCtx, req.GetWrites(), now)
+		return batchErr
+	}); err != nil {
 		return nil, err
 	}
 	return &firestorev1.CommitResponse{
@@ -260,11 +283,15 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 			if doc.GetName() == "" {
 				return nil, status.Error(codes.InvalidArgument, "write.update.name is required")
 			}
+			mask := w.GetUpdateMask()
+			hasMask := mask != nil && len(mask.GetFieldPaths()) > 0
+			// Default is upsert (create or overwrite). A mask alone does NOT imply
+			// "must exist" — setDoc({merge:true}) sends a mask with no precondition.
+			// Only an explicit currentDocument.exists=true precondition switches to
+			// update-only mode.
 			mode := store.WriteModeUpsert
-			if mask := w.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
-				mode = store.WriteModeUpdate
-			}
 			// Apply currentDocument precondition for the update operation.
+			var preconditionUpdateTime *timestamppb.Timestamp
 			if pre := w.GetCurrentDocument(); pre != nil {
 				switch c := pre.GetConditionType().(type) {
 				case *firestorev1.Precondition_Exists:
@@ -274,38 +301,61 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 						mode = store.WriteModeInsertOnly
 					}
 				case *firestorev1.Precondition_UpdateTime:
-					_ = c // treat update_time precondition as "must exist"
+					preconditionUpdateTime = c.UpdateTime
 					mode = store.WriteModeUpdate
 				}
 			}
 
-			// Apply field transforms if present.
+			// Determine if we need to read the current document.
+			// Required when: mask is present, transforms present, or
+			// updateTime precondition must be validated.
 			transforms := w.GetUpdateTransforms()
+			needsRead := hasMask || preconditionUpdateTime != nil || len(transforms) > 0
+			var currFields map[string]*firestorev1.Value
+			if needsRead {
+				curr, err := s.db.GetDocument(ctx, doc.GetName())
+				if err == nil {
+					currDoc, _ := codec.StoreToProto(curr)
+					currFields = currDoc.GetFields()
+					// Validate updateTime precondition.
+					if preconditionUpdateTime != nil {
+						if !curr.UpdatedAt.Truncate(time.Microsecond).Equal(preconditionUpdateTime.AsTime().Truncate(time.Microsecond)) {
+							return nil, status.Errorf(codes.FailedPrecondition,
+								"document %s has been modified: expected updateTime %v, got %v",
+								doc.GetName(), preconditionUpdateTime.AsTime(), curr.UpdatedAt)
+						}
+					}
+				} else if preconditionUpdateTime != nil {
+					// updateTime precondition on a missing document always fails.
+					return nil, status.Errorf(codes.FailedPrecondition,
+						"document %s does not exist, cannot satisfy updateTime precondition", doc.GetName())
+				}
+			}
+
+			// Apply field transforms.
 			fields := doc.GetFields()
 			var transformResults []*firestorev1.Value
 			if len(transforms) > 0 {
-				var currFields map[string]*firestorev1.Value
-				needsRead := false
-				for _, t := range transforms {
-					switch t.GetTransformType().(type) {
-					case *firestorev1.DocumentTransform_FieldTransform_Increment,
-						*firestorev1.DocumentTransform_FieldTransform_AppendMissingElements,
-						*firestorev1.DocumentTransform_FieldTransform_RemoveAllFromArray:
-						needsRead = true
-					}
-				}
-				if needsRead {
-					curr, err := s.db.GetDocument(ctx, doc.GetName())
-					if err == nil {
-						currDoc, _ := codec.StoreToProto(curr)
-						currFields = currDoc.GetFields()
-					}
+				// Transform-only writes (no mask, no explicit fields) are deltas on the
+				// current document. Use currFields as the base so that sibling fields are
+				// preserved — e.g. updateDoc({meta.updatedAt: serverTimestamp()}) must
+				// keep meta.name intact.
+				baseFields := fields
+				if !hasMask && len(fields) == 0 && currFields != nil {
+					baseFields = currFields
 				}
 				var transformErr error
-				fields, transformResults, transformErr = applyFieldTransforms(fields, transforms, currFields, now)
+				fields, transformResults, transformErr = applyFieldTransforms(baseFields, transforms, currFields, now)
 				if transformErr != nil {
 					return nil, transformErr
 				}
+			}
+
+			// When update_mask is present, merge only the masked fields into the
+			// existing document. Nested dot-notation paths (e.g. "a.b.c") are
+			// handled recursively; siblings are preserved.
+			if hasMask {
+				fields = applyMask(currFields, fields, mask.GetFieldPaths())
 			}
 
 			writeDoc := &firestorev1.Document{Name: doc.GetName(), Fields: fields}
@@ -344,7 +394,13 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 
 		case nil:
 			// VerifyMutation: no operation, only a currentDocument precondition.
-			// In the non-transaction path this is a no-op; skip silently.
+			// In this proto's generated code there's no path-bearing `verify`
+			// field, so the precondition can't be checked against a target —
+			// but we MUST still append a WriteResult to keep the per-write
+			// length contract that the Firebase SDK enforces.
+			results = append(results, &firestorev1.WriteResult{
+				UpdateTime: timestamppb.New(now),
+			})
 
 		default:
 			return nil, status.Error(codes.Unimplemented, "write operation type not yet supported")
@@ -396,8 +452,12 @@ func (s *firestoreServer) Write(stream firestorev1.Firestore_WriteServer) error 
 
 		s.log.Info("Write stream: applying batch", zap.Int("writes", len(req.GetWrites())))
 		now = time.Now().UTC()
-		results, err := s.applyWriteBatch(stream.Context(), req.GetWrites(), now)
-		if err != nil {
+		var results []*firestorev1.WriteResult
+		if err := s.db.WithTransaction(stream.Context(), func(txCtx context.Context) error {
+			var batchErr error
+			results, batchErr = s.applyWriteBatch(txCtx, req.GetWrites(), now)
+			return batchErr
+		}); err != nil {
 			s.log.Error("Write stream: applyWriteBatch error", zap.Error(err))
 			return err
 		}
@@ -424,6 +484,7 @@ func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRe
 
 	// Resolve the transaction ID to use for reads.
 	txID := ""
+	ownedTx := false // true when this handler started the transaction
 	switch cs := req.GetConsistencySelector().(type) {
 	case *firestorev1.BatchGetDocumentsRequest_Transaction:
 		txID = string(cs.Transaction)
@@ -438,6 +499,13 @@ func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRe
 		if err != nil {
 			return err
 		}
+		ownedTx = true
+		// Roll back if this handler fails; cleared on success so client can Commit/Rollback.
+		defer func() {
+			if ownedTx {
+				_ = s.db.RollbackTransaction(ctx, txID)
+			}
+		}()
 		// First response carries the new transaction ID so the client can later Commit/Rollback.
 		if err := stream.Send(&firestorev1.BatchGetDocumentsResponse{
 			Transaction: []byte(txID),
@@ -484,6 +552,7 @@ func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRe
 		}
 	}
 
+	ownedTx = false // success: client is responsible for Commit/Rollback
 	return nil
 }
 
@@ -646,32 +715,96 @@ func (s *runQueryStreamer) Context() context.Context        { return s.ctx }
 func (s *runQueryStreamer) SendMsg(m any) error             { return nil }
 func (s *runQueryStreamer) RecvMsg(m any) error             { return nil }
 
-// applyMask merges incoming fields into current fields, honouring the field mask.
-// Fields listed in maskPaths are replaced by the incoming value (or removed if
-// absent in incoming). Fields not in maskPaths are kept from current.
-// Only top-level field paths are supported in Plan 2.
+// applyMask merges incoming fields into current fields honouring the field mask.
+// Mask paths may use dot-notation for nested fields (e.g. "profile.age").
+// Fields in maskPaths are replaced by the corresponding incoming value, or deleted
+// if absent from incoming. Fields not in maskPaths are kept unchanged.
+// Intermediate map nodes are deep-copied before modification to avoid aliasing.
 func applyMask(current, incoming map[string]*firestorev1.Value, maskPaths []string) map[string]*firestorev1.Value {
-	result := make(map[string]*firestorev1.Value, len(current))
-	// TODO(plan3): Value pointers from current are copied by reference, not deep-cloned.
-	// This is safe because neither the adapter nor codec mutates Value nodes after creation.
-	// Plan 3 must deep-clone here if a document cache or proto pooling is introduced —
-	// both could cause silent aliasing corruption through this map.
-	for k, v := range current {
-		result[k] = v
-	}
+	result := cloneFields(current)
 	for _, fp := range maskPaths {
-		// Only use the top-level field name (before the first dot).
-		topField := fp
-		if idx := strings.IndexByte(fp, '.'); idx >= 0 {
-			topField = fp[:idx]
-		}
-		if v, ok := incoming[topField]; ok {
-			result[topField] = v
+		segments := strings.SplitN(fp, ".", 2)
+		top := segments[0]
+		if len(segments) == 1 {
+			// Leaf at the top level.
+			if v, ok := incoming[top]; ok {
+				result[top] = v
+			} else {
+				delete(result, top)
+			}
 		} else {
-			delete(result, topField)
+			// Nested path: recurse into the map at top.
+			rest := segments[1]
+			incomingChild := getNestedFields(incoming, top)
+			currentChild := getNestedFields(result, top)
+			merged := applyMask(currentChild, incomingChild, []string{rest})
+			if result[top] == nil {
+				result[top] = &firestorev1.Value{ValueType: &firestorev1.Value_MapValue{
+					MapValue: &firestorev1.MapValue{Fields: merged},
+				}}
+			} else {
+				// Clone the Value node so we don't alias the stored proto.
+				result[top] = &firestorev1.Value{ValueType: &firestorev1.Value_MapValue{
+					MapValue: &firestorev1.MapValue{Fields: merged},
+				}}
+			}
 		}
 	}
 	return result
+}
+
+// cloneFields returns a shallow copy of the fields map (new map, same value pointers).
+func cloneFields(m map[string]*firestorev1.Value) map[string]*firestorev1.Value {
+	c := make(map[string]*firestorev1.Value, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
+}
+
+// getNestedFields returns the Fields map inside a MapValue at key top, or nil.
+func getNestedFields(m map[string]*firestorev1.Value, top string) map[string]*firestorev1.Value {
+	v, ok := m[top]
+	if !ok || v == nil {
+		return nil
+	}
+	mv := v.GetMapValue()
+	if mv == nil {
+		return nil
+	}
+	return mv.GetFields()
+}
+
+// nestedGetValue traverses a dot-notation field path and returns the leaf value.
+func nestedGetValue(fields map[string]*firestorev1.Value, fp string) *firestorev1.Value {
+	segments := strings.SplitN(fp, ".", 2)
+	if len(segments) == 1 {
+		return fields[segments[0]]
+	}
+	child := getNestedFields(fields, segments[0])
+	if child == nil {
+		return nil
+	}
+	return nestedGetValue(child, segments[1])
+}
+
+// nestedSetValue sets a value at a dot-notation field path, creating map nodes as needed.
+func nestedSetValue(result map[string]*firestorev1.Value, fp string, val *firestorev1.Value) {
+	segments := strings.SplitN(fp, ".", 2)
+	top := segments[0]
+	if len(segments) == 1 {
+		result[top] = val
+		return
+	}
+	child := getNestedFields(result, top)
+	childCopy := make(map[string]*firestorev1.Value, len(child))
+	for k, v := range child {
+		childCopy[k] = v
+	}
+	nestedSetValue(childCopy, segments[1], val)
+	result[top] = &firestorev1.Value{ValueType: &firestorev1.Value_MapValue{
+		MapValue: &firestorev1.MapValue{Fields: childCopy},
+	}}
 }
 
 // applyFieldTransforms applies field transforms and returns the updated fields
@@ -694,10 +827,6 @@ func applyFieldTransforms(
 
 	for _, t := range transforms {
 		fp := t.GetFieldPath()
-		// Only top-level field paths supported in plan 3.
-		if strings.ContainsRune(fp, '.') {
-			return nil, nil, status.Errorf(codes.Unimplemented, "nested field transforms not yet supported: %s", fp)
-		}
 
 		switch tt := t.GetTransformType().(type) {
 
@@ -709,13 +838,13 @@ func applyFieldTransforms(
 						TimestampValue: timestamppb.New(now),
 					},
 				}
-				result[fp] = val
+				nestedSetValue(result, fp, val)
 			}
 			transformResults = append(transformResults, val)
 
 		case *firestorev1.DocumentTransform_FieldTransform_Increment:
 			delta := tt.Increment
-			curr := currFields[fp]
+			curr := nestedGetValue(currFields, fp)
 			var val *firestorev1.Value
 			switch d := delta.GetValueType().(type) {
 			case *firestorev1.Value_IntegerValue:
@@ -741,12 +870,15 @@ func applyFieldTransforms(
 				val = &firestorev1.Value{ValueType: &firestorev1.Value_DoubleValue{
 					DoubleValue: existing + d.DoubleValue,
 				}}
+			default:
+				return nil, nil, status.Errorf(codes.InvalidArgument,
+					"increment delta must be integer or double, got %T", delta.GetValueType())
 			}
-			result[fp] = val
+			nestedSetValue(result, fp, val)
 			transformResults = append(transformResults, val)
 
 		case *firestorev1.DocumentTransform_FieldTransform_AppendMissingElements:
-			curr := currFields[fp]
+			curr := nestedGetValue(currFields, fp)
 			var existing []*firestorev1.Value
 			if curr != nil {
 				if av, ok := curr.GetValueType().(*firestorev1.Value_ArrayValue); ok {
@@ -770,16 +902,22 @@ func applyFieldTransforms(
 			mergedVal := &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
 				ArrayValue: &firestorev1.ArrayValue{Values: merged},
 			}}
-			result[fp] = mergedVal
+			nestedSetValue(result, fp, mergedVal)
 			transformResults = append(transformResults, mergedVal)
 
 		case *firestorev1.DocumentTransform_FieldTransform_RemoveAllFromArray:
-			curr := currFields[fp]
+			curr := nestedGetValue(currFields, fp)
+			emptyArr := &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
+				ArrayValue: &firestorev1.ArrayValue{},
+			}}
+			if curr == nil {
+				// Field absent — arrayRemove is a no-op; don't create the field.
+				transformResults = append(transformResults, emptyArr)
+				continue
+			}
 			var existing []*firestorev1.Value
-			if curr != nil {
-				if av, ok := curr.GetValueType().(*firestorev1.Value_ArrayValue); ok {
-					existing = av.ArrayValue.GetValues()
-				}
+			if av, ok := curr.GetValueType().(*firestorev1.Value_ArrayValue); ok {
+				existing = av.ArrayValue.GetValues()
 			}
 			toRemove := tt.RemoveAllFromArray.GetValues()
 			kept := existing[:0:0]
@@ -798,7 +936,7 @@ func applyFieldTransforms(
 			keptVal := &firestorev1.Value{ValueType: &firestorev1.Value_ArrayValue{
 				ArrayValue: &firestorev1.ArrayValue{Values: kept},
 			}}
-			result[fp] = keptVal
+			nestedSetValue(result, fp, keptVal)
 			transformResults = append(transformResults, keptVal)
 		}
 	}

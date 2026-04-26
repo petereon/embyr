@@ -119,7 +119,9 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 					}
 					b, err := protojson.Marshal(resp)
 					if err != nil {
-						continue
+						log.Printf("[webchannel] listen pump: marshal error (terminating session): %v", err)
+						cancel()
+						return
 					}
 					chunk := sess.FormatDataChunk(json.RawMessage(b))
 					sess.listenLog.Append(chunk)
@@ -129,11 +131,11 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		log.Printf("[webchannel] POST new-session sid=%s parsed=%d reqs", sess.ID, len(reqs))
 		for _, req := range reqs {
 			select {
 			case bridge.recvCh <- req:
-			default:
+			case <-r.Context().Done():
+				return
 			}
 		}
 
@@ -146,20 +148,39 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 
 	// Forward channel message for existing session.
 	sess := h.mgr.Get(sid)
-	if sess == nil {
+	if sess == nil || sess.GetListenBridge() == nil {
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
+	bridge := sess.GetListenBridge()
 	if !sess.SeenRID(rid) {
 		reqs, _ := parseForwardBody(r)
 		for _, req := range reqs {
 			select {
-			case sess.bridge.recvCh <- req:
-			default:
+			case bridge.recvCh <- req:
+			case <-r.Context().Done():
+				return
 			}
 		}
 	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(formatForwardPostStatus(sess))
+}
+
+// formatForwardPostStatus returns the body for a WebChannel forward POST
+// response. The SDK reads the body via the same chunk extractor it uses for
+// the back-channel — `<length>\n<json>` — and the JSON must be a 3-element
+// array of [lastArrayId, outstandingBytes, unused] (see Rb in
+// @firebase/webchannel-wrapper). A bare JSON body, or an empty body, leaves
+// the SDK's chunk extractor in "incomplete" state, which marks the forward
+// request as failed and blocks every subsequent send on this WebChannel
+// session — manifesting as filter switches that hang or session reconnects
+// every ~10 seconds.
+func formatForwardPostStatus(sess *Session) []byte {
+	json := fmt.Sprintf("[%d,0,0]", sess.DataSeq()-1)
+	return []byte(fmt.Sprintf("%d\n%s", len(json), json))
 }
 
 // handleBack handles GET /Listen/channel — the long-polling back channel.
@@ -168,10 +189,12 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleBack(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("SID")
 	sess := h.mgr.Get(sid)
-	if sess == nil {
+	if sess == nil || sess.GetListenBridge() == nil {
+		// Either no such session or it belongs to the Write channel.
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
+	bridge := sess.GetListenBridge()
 
 	// AID is the last array-id the client acknowledged. The first data chunk
 	// is seq=2 (log index 0). For seq S, log index = S-2. We want seq > AID,
@@ -211,7 +234,7 @@ func (h *Handler) handleBack(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-sess.bridge.ctx.Done():
+		case <-bridge.ctx.Done():
 			// Drain any remaining chunks before closing.
 			final, _ := sess.listenLog.From(logIdx)
 			for _, c := range final {
@@ -222,7 +245,9 @@ func (h *Handler) handleBack(w http.ResponseWriter, r *http.Request) {
 		case <-notify:
 			// New data in log — loop to drain it.
 		case <-keepAlive.C:
-			_, _ = w.Write(sess.FormatNoopChunk())
+			// Noops claim seqs from the same global counter as data chunks so
+			// no two chunks in a session ever share a seq.
+			_, _ = w.Write(sess.FormatNoopChunk(sess.NextNoopSeq()))
 			flusher.Flush()
 		}
 	}
@@ -300,7 +325,6 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 	if sid == "" && rid != "" {
 		sess := h.mgr.NewSession()
 		reqs, _ := parseWriteForwardBody(r)
-
 		ctx, cancel := context.WithCancel(context.Background())
 		bridge := newWriteBridge(ctx)
 
@@ -324,7 +348,9 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 					}
 					b, err := protojson.Marshal(resp)
 					if err != nil {
-						continue
+						log.Printf("[webchannel] write pump: marshal error (terminating session): %v", err)
+						cancel()
+						return
 					}
 					chunk := sess.FormatDataChunk(json.RawMessage(b))
 					sess.writeLog.Append(chunk)
@@ -337,7 +363,8 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 		for _, req := range reqs {
 			select {
 			case bridge.recvCh <- req:
-			default:
+			case <-r.Context().Done():
+				return
 			}
 		}
 
@@ -349,36 +376,35 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess := h.mgr.Get(sid)
-	if sess == nil {
-		log.Printf("[webchannel] Write POST sid=%s not found", sid)
+	if sess == nil || sess.GetWriteBridge() == nil {
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
+	wb := sess.GetWriteBridge()
 	if !sess.SeenRID(rid) {
 		reqs, _ := parseWriteForwardBody(r)
-		log.Printf("[webchannel] Write POST sid=%s rid=%s parsed=%d reqs", sid, rid, len(reqs))
 		for _, req := range reqs {
-			log.Printf("[webchannel] Write req writes=%d", len(req.GetWrites()))
 			select {
-			case sess.writeBridge.recvCh <- req:
-			default:
-				log.Printf("[webchannel] Write recvCh full, dropping req")
+			case wb.recvCh <- req:
+			case <-r.Context().Done():
+				return
 			}
 		}
-	} else {
-		log.Printf("[webchannel] Write POST sid=%s rid=%s duplicate (skipped)", sid, rid)
 	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(formatForwardPostStatus(sess))
 }
 
 func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("SID")
 	sess := h.mgr.Get(sid)
-	if sess == nil {
-		log.Printf("[webchannel] Write GET back-channel sid=%s not found", sid)
+	if sess == nil || sess.GetWriteBridge() == nil {
 		http.Error(w, "session not found", http.StatusBadRequest)
 		return
 	}
+	wb := sess.GetWriteBridge()
 
 	logIdx := 0
 	if aidStr := r.URL.Query().Get("AID"); aidStr != "" {
@@ -386,8 +412,6 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 			logIdx = n - 1
 		}
 	}
-	log.Printf("[webchannel] Write GET back-channel sid=%s AID=%s logIdx=%d", sid, r.URL.Query().Get("AID"), logIdx)
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -414,7 +438,7 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-sess.writeBridge.ctx.Done():
+		case <-wb.ctx.Done():
 			final, _ := sess.writeLog.From(logIdx)
 			for _, c := range final {
 				_, _ = w.Write(c)
@@ -424,7 +448,7 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 		case <-notify:
 			// New data in log — loop to drain it.
 		case <-keepAlive.C:
-			_, _ = w.Write(sess.FormatNoopChunk())
+			_, _ = w.Write(sess.FormatNoopChunk(sess.NextNoopSeq()))
 			flusher.Flush()
 		}
 	}

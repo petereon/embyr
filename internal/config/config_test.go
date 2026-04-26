@@ -62,3 +62,30 @@ func TestLoad_EnvOverride(t *testing.T) {
 	assert.Equal(t, "env-override-key", cfg.Auth.Key)
 	assert.Equal(t, "sqlite", cfg.Backend.Type)
 }
+
+func TestLoad_Validation_PortConflict(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := "server:\n  grpc_port: 9000\n  rest_port: 9000\n"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0600))
+	_, err := config.Load(path)
+	require.Error(t, err, "same grpc_port and rest_port must be rejected")
+}
+
+func TestLoad_Validation_InvalidPort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := "server:\n  grpc_port: 0\n  rest_port: 8081\n"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0600))
+	_, err := config.Load(path)
+	require.Error(t, err, "port 0 must be rejected")
+}
+
+func TestLoad_Validation_ZeroTTL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := "transactions:\n  ttl: 0s\n"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0600))
+	_, err := config.Load(path)
+	require.Error(t, err, "TTL=0 must be rejected")
+}

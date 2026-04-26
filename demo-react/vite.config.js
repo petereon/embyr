@@ -4,6 +4,10 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
+    cors: {
+      origin: true,
+      credentials: true,
+    },
     proxy: {
       // REST (grpc-gateway): used by firebase/firestore/lite
       '/v1': {

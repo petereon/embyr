@@ -7,3 +7,9 @@ firstyr
 
 # Go build artifacts
 *.out
+
+# JS artifacts
+**/node_modules
+
+# Dev files
+firstyr.db

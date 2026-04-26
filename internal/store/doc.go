@@ -1,6 +1,41 @@
 package store
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// ParsePath extracts the immediate collection name and parent path from a full
+// Firestore document path. Both sqlite and postgres sub-packages use this
+// instead of maintaining local copies.
+//
+// Example:
+//
+//	ParsePath("projects/p/databases/d/documents/users/alice")
+//	→ collection="users", parent="projects/p/databases/d/documents"
+func ParsePath(path string) (collection, parent string) {
+	parts := strings.Split(path, "/")
+	docsIdx := -1
+	for i, p := range parts {
+		if p == "documents" {
+			docsIdx = i
+			break
+		}
+	}
+	if docsIdx < 0 {
+		return "", ""
+	}
+	relative := parts[docsIdx+1:]
+	if len(relative) < 2 || len(relative)%2 != 0 {
+		return "", ""
+	}
+	collection = relative[len(relative)-2]
+	parentParts := make([]string, 0, docsIdx+1+len(relative)-2)
+	parentParts = append(parentParts, parts[:docsIdx+1]...)
+	parentParts = append(parentParts, relative[:len(relative)-2]...)
+	parent = strings.Join(parentParts, "/")
+	return collection, parent
+}
 
 // WriteMode controls the existence precondition for UpdateDocument.
 type WriteMode int8

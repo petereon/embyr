@@ -2,10 +2,9 @@ package server
 
 import (
 	"context"
+	"time"
 
 	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/codec"
-	"github.com/petereon/firstyr/internal/store"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -37,66 +36,53 @@ func (s *firestoreServer) Rollback(ctx context.Context, req *firestorev1.Rollbac
 	return &emptypb.Empty{}, nil
 }
 
-// BatchWrite applies a list of writes atomically using WithTransaction.
-// Unlike Commit, BatchWrite does not use Firestore transactions or OCC.
+// BatchWrite applies a list of writes with per-write success/failure isolation.
+// Per the Firestore spec, BatchWrite is NOT atomic — each write succeeds or
+// fails independently and per-write errors are reported in the response's
+// status array. Each write supports update_mask, update_transforms, and
+// currentDocument preconditions; the implementation reuses applyWriteBatch
+// per write so the semantics match Commit's non-tx path.
 func (s *firestoreServer) BatchWrite(ctx context.Context, req *firestorev1.BatchWriteRequest) (*firestorev1.BatchWriteResponse, error) {
-	now := timestamppb.Now()
-	writeResults := make([]*firestorev1.WriteResult, len(req.GetWrites()))
+	now := time.Now().UTC()
+	writes := req.GetWrites()
+	writeResults := make([]*firestorev1.WriteResult, len(writes))
+	statuses := make([]*rpcstatus.Status, len(writes))
 
-	err := s.db.WithTransaction(ctx, func(ctx context.Context) error {
-		for i, w := range req.GetWrites() {
-			switch op := w.GetOperation().(type) {
-			case *firestorev1.Write_Update:
-				doc := op.Update
-				if doc.GetName() == "" {
-					return status.Error(codes.InvalidArgument, "write.update.name is required")
-				}
-				mode := store.WriteModeUpsert
-				if mask := w.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
-					mode = store.WriteModeUpdate
-				}
-				sd, err := codec.ProtoToStore(doc)
-				if err != nil {
-					return status.Errorf(codes.Internal, "encode document: %v", err)
-				}
-				result, err := s.db.UpdateDocument(ctx, sd, mode)
-				if err != nil {
-					return err
-				}
-				writeResults[i] = &firestorev1.WriteResult{UpdateTime: timestamppb.New(result.UpdatedAt)}
-
-			case *firestorev1.Write_Delete:
-				if op.Delete == "" {
-					return status.Error(codes.InvalidArgument, "write.delete path is required")
-				}
-				mustExist := false
-				if pre := w.GetCurrentDocument(); pre != nil {
-					switch c := pre.GetConditionType().(type) {
-					case *firestorev1.Precondition_Exists:
-						mustExist = c.Exists
-					case *firestorev1.Precondition_UpdateTime:
-						mustExist = true
-					}
-				}
-				if err := s.db.DeleteDocument(ctx, op.Delete, mustExist); err != nil {
-					return err
-				}
-				writeResults[i] = &firestorev1.WriteResult{UpdateTime: now}
-
-			default:
-				return status.Error(codes.Unimplemented, "write operation type not supported in BatchWrite")
+	for i, w := range writes {
+		// Apply each write in its own transaction so a failure doesn't roll
+		// back its siblings.
+		var perWriteResults []*firestorev1.WriteResult
+		err := s.db.WithTransaction(ctx, func(txCtx context.Context) error {
+			rs, batchErr := s.applyWriteBatch(txCtx, []*firestorev1.Write{w}, now)
+			perWriteResults = rs
+			return batchErr
+		})
+		if err != nil {
+			st, ok := status.FromError(err)
+			if !ok {
+				st = status.New(codes.Unknown, err.Error())
 			}
+			statuses[i] = &rpcstatus.Status{
+				Code:    int32(st.Code()),
+				Message: st.Message(),
+			}
+			// Provide an empty (non-nil) WriteResult to keep slice positions aligned.
+			writeResults[i] = &firestorev1.WriteResult{}
+			continue
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		// applyWriteBatch returns one result per write; for a single write
+		// it's a slice of length 0 (VerifyMutation no-op) or 1.
+		if len(perWriteResults) > 0 {
+			writeResults[i] = perWriteResults[0]
+		} else {
+			writeResults[i] = &firestorev1.WriteResult{UpdateTime: timestamppb.New(now)}
+		}
+		// nil entry = OK per Firestore spec.
+		statuses[i] = nil
 	}
 
-	// BatchWriteResponse.Status is []*google.rpc.Status; nil entries = success.
-	statusSlice := make([]*rpcstatus.Status, len(writeResults))
 	return &firestorev1.BatchWriteResponse{
 		WriteResults: writeResults,
-		Status:       statusSlice,
+		Status:       statuses,
 	}, nil
 }
