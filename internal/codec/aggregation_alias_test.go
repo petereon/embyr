@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/codec"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/codec"
 	"github.com/stretchr/testify/require"
 )
 

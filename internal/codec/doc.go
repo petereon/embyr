@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/store"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/store"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

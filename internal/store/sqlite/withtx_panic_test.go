@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petereon/firstyr/internal/store/sqlite"
+	"github.com/petereon/embyr/internal/store/sqlite"
 	"github.com/stretchr/testify/require"
 )
 

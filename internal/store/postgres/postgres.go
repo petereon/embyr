@@ -19,7 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/petereon/firstyr/internal/store"
+	"github.com/petereon/embyr/internal/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

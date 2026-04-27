@@ -1,4 +1,4 @@
-# firstyr — Plan 2: Document CRUD + Auth Middleware
+# embyr — Plan 2: Document CRUD + Auth Middleware
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.25, `google.golang.org/protobuf/encoding/protojson` (field serialisation), `modernc.org/sqlite` (SQLite CRUD + `RETURNING`), `pgx/v5/pgconn` (PostgreSQL error codes), `google.golang.org/grpc/metadata` + `peer` + `credentials` (auth), `net/http` (Google token introspection)
 
-> **Module path:** `github.com/petereon/firstyr`
+> **Module path:** `github.com/petereon/embyr`
 > **Working branch:** `plan-1-foundation` (continue on this branch)
 > **This is Plan 2 of 5.** Builds directly on Plan 1's foundation.
 
@@ -57,7 +57,7 @@ package store_test
 
 import (
     "testing"
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
 )
 
 func TestDocumentTypeExists(t *testing.T) {
@@ -72,7 +72,7 @@ func TestDocumentTypeExists(t *testing.T) {
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-cd /Users/peter.vyboch/utilities/firstyr
+cd /Users/peter.vyboch/utilities/embyr
 go test ./internal/store/... 2>&1
 ```
 
@@ -242,9 +242,9 @@ import (
     "testing"
     "time"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/codec"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/codec"
+    "github.com/petereon/embyr/internal/store"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
     "google.golang.org/protobuf/types/known/timestamppb"
@@ -351,8 +351,8 @@ import (
     "strings"
     "time"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/store"
     "google.golang.org/protobuf/encoding/protojson"
     "google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -493,7 +493,7 @@ Add these tests to `internal/store/sqlite/sqlite_test.go`. The file currently ha
 
 ```go
 // Add to the import block:
-//   "github.com/petereon/firstyr/internal/store"
+//   "github.com/petereon/embyr/internal/store"
 //   "github.com/stretchr/testify/assert"
 //   "google.golang.org/grpc/codes"
 //   "google.golang.org/grpc/status"
@@ -739,7 +739,7 @@ import (
     "testing"
     "time"
 
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
     "google.golang.org/grpc/codes"
@@ -1217,7 +1217,7 @@ import (
     _ "github.com/golang-migrate/migrate/v4/source/file"
     _ "modernc.org/sqlite"
 
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
 )
@@ -1262,8 +1262,8 @@ import (
     "testing"
     "time"
 
-    "github.com/petereon/firstyr/internal/store"
-    "github.com/petereon/firstyr/internal/store/postgres"
+    "github.com/petereon/embyr/internal/store"
+    "github.com/petereon/embyr/internal/store/postgres"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
     "google.golang.org/grpc/codes"
@@ -1425,7 +1425,7 @@ import (
     "github.com/jackc/pgx/v5/pgconn"
     _ "github.com/jackc/pgx/v5/stdlib"
 
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
 )
@@ -1721,8 +1721,8 @@ import (
     "net/http/httptest"
     "testing"
 
-    "github.com/petereon/firstyr/internal/auth"
-    "github.com/petereon/firstyr/internal/config"
+    "github.com/petereon/embyr/internal/auth"
+    "github.com/petereon/embyr/internal/config"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
     "go.uber.org/zap"
@@ -1865,7 +1865,7 @@ import (
     "os"
     "strings"
 
-    "github.com/petereon/firstyr/internal/config"
+    "github.com/petereon/embyr/internal/config"
     "go.uber.org/zap"
     "google.golang.org/grpc"
     "google.golang.org/grpc/codes"
@@ -2132,9 +2132,9 @@ import (
     "context"
     "strings"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/codec"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/codec"
+    "github.com/petereon/embyr/internal/store"
     "go.uber.org/zap"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
@@ -2335,11 +2335,11 @@ import (
     "net/http"
     "time"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/auth"
-    "github.com/petereon/firstyr/internal/config"
-    "github.com/petereon/firstyr/internal/health"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/auth"
+    "github.com/petereon/embyr/internal/config"
+    "github.com/petereon/embyr/internal/health"
+    "github.com/petereon/embyr/internal/store"
     "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
     "go.uber.org/zap"
     "golang.org/x/sync/errgroup"
@@ -2498,9 +2498,9 @@ import (
     "testing"
     "time"
 
-    "github.com/petereon/firstyr/internal/config"
-    "github.com/petereon/firstyr/internal/server"
-    "github.com/petereon/firstyr/internal/store/sqlite"
+    "github.com/petereon/embyr/internal/config"
+    "github.com/petereon/embyr/internal/server"
+    "github.com/petereon/embyr/internal/store/sqlite"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
     "go.uber.org/zap"
@@ -2715,7 +2715,7 @@ Before declaring Plan 2 complete, confirm all of the following:
 - [ ] Auth interceptors: none, key (valid/invalid/missing), google (valid/wrong audience), mtls logic all tested
 - [ ] Server: `TestServer_StartsAndServes` still passes after the refactor
 - [ ] REST handler tests: create, create-duplicate, get, get-not-found, update, delete, list all exercise the real gateway
-- [ ] Binary (`./firstyr`) starts, `/healthz` returns `ok`, CreateDocument round-trip works via curl
+- [ ] Binary (`./embyr`) starts, `/healthz` returns `ok`, CreateDocument round-trip works via curl
 
 ---
 

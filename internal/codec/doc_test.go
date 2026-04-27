@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/codec"
-	"github.com/petereon/firstyr/internal/store"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/codec"
+	"github.com/petereon/embyr/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"

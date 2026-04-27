@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/petereon/firstyr/internal/auth"
-	"github.com/petereon/firstyr/internal/config"
+	"github.com/petereon/embyr/internal/auth"
+	"github.com/petereon/embyr/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

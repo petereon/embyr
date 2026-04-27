@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/petereon/firstyr/internal/auth"
-	"github.com/petereon/firstyr/internal/config"
+	"github.com/petereon/embyr/internal/auth"
+	"github.com/petereon/embyr/internal/config"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -45,8 +45,8 @@ func TestGoogleAuth_AccessTokenAccepted(t *testing.T) {
 				// project; the response does not echo the project_id directly.
 				// The validator must accept any 200 response when the project
 				// ID match isn't possible from the access_token shape.
-				"scope":     "https://www.googleapis.com/auth/datastore",
-				"audience":  "1234567890-clientid.apps.googleusercontent.com",
+				"scope":      "https://www.googleapis.com/auth/datastore",
+				"audience":   "1234567890-clientid.apps.googleusercontent.com",
 				"expires_in": 3000,
 			})
 		default:

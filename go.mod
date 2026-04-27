@@ -1,4 +1,4 @@
-module github.com/petereon/firstyr
+module github.com/petereon/embyr
 
 go 1.25.0
 

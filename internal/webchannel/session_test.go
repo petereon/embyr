@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/petereon/firstyr/internal/webchannel"
+	"github.com/petereon/embyr/internal/webchannel"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,21 +28,21 @@ func TestSession_NewAndEncodeMessage(t *testing.T) {
 
 func TestDecodeGRPCWebFrame(t *testing.T) {
 	tests := []struct {
-		name      string
-		frame     []byte
-		expectErr bool
+		name          string
+		frame         []byte
+		expectErr     bool
 		expectPayload []byte
 	}{
 		{
-			name:      "valid frame round-trip",
-			frame:     webchannel.EncodeGRPCWebFrame([]byte("hello world")),
-			expectErr: false,
+			name:          "valid frame round-trip",
+			frame:         webchannel.EncodeGRPCWebFrame([]byte("hello world")),
+			expectErr:     false,
 			expectPayload: []byte("hello world"),
 		},
 		{
-			name:      "empty payload",
-			frame:     webchannel.EncodeGRPCWebFrame([]byte{}),
-			expectErr: false,
+			name:          "empty payload",
+			frame:         webchannel.EncodeGRPCWebFrame([]byte{}),
+			expectErr:     false,
 			expectPayload: []byte{},
 		},
 		{

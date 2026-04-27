@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petereon/firstyr/internal/store"
-	"github.com/petereon/firstyr/internal/store/postgres"
+	"github.com/petereon/embyr/internal/store"
+	"github.com/petereon/embyr/internal/store/postgres"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -385,7 +385,7 @@ func TestPostgresAdapter_ListDocuments_ExactPageBoundary(t *testing.T) {
 // ── Subscribe LISTEN/NOTIFY tests ─────────────────────────────────────────────
 // These tests require a running PostgreSQL instance. Set TEST_POSTGRES_DSN to
 // enable them, e.g.:
-//   TEST_POSTGRES_DSN="postgres://postgres:postgres@localhost:5432/firstyr_test?sslmode=disable" go test ./internal/store/postgres/...
+//   TEST_POSTGRES_DSN="postgres://postgres:postgres@localhost:5432/embyr_test?sslmode=disable" go test ./internal/store/postgres/...
 
 func TestPostgres_Subscribe_ReceivesChange(t *testing.T) {
 	a := newTestAdapter(t)
@@ -495,7 +495,7 @@ func TestPostgresAdapter_OrderByInteger_NumericSort(t *testing.T) {
 
 	base := fmt.Sprintf("projects/p/databases/d/documents/things/%d", time.Now().UnixNano())
 	for _, tc := range []struct {
-		id   string
+		id    string
 		votes string
 	}{
 		{"nine", "9"},

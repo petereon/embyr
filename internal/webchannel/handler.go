@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -34,10 +34,10 @@ func newListenBridge(ctx context.Context) *listenBridge {
 // grpc.ServerStream interface
 func (b *listenBridge) SetHeader(metadata.MD) error  { return nil }
 func (b *listenBridge) SendHeader(metadata.MD) error { return nil }
-func (b *listenBridge) SetTrailer(metadata.MD)        {}
-func (b *listenBridge) Context() context.Context      { return b.ctx }
-func (b *listenBridge) SendMsg(m any) error           { return nil }
-func (b *listenBridge) RecvMsg(m any) error           { return nil }
+func (b *listenBridge) SetTrailer(metadata.MD)       {}
+func (b *listenBridge) Context() context.Context     { return b.ctx }
+func (b *listenBridge) SendMsg(m any) error          { return nil }
+func (b *listenBridge) RecvMsg(m any) error          { return nil }
 
 // Firestore_ListenServer interface
 func (b *listenBridge) Send(resp *firestorev1.ListenResponse) error {
@@ -272,10 +272,10 @@ func newWriteBridge(ctx context.Context) *writeBridge {
 
 func (b *writeBridge) SetHeader(metadata.MD) error  { return nil }
 func (b *writeBridge) SendHeader(metadata.MD) error { return nil }
-func (b *writeBridge) SetTrailer(metadata.MD)        {}
-func (b *writeBridge) Context() context.Context      { return b.ctx }
-func (b *writeBridge) SendMsg(m any) error            { return nil }
-func (b *writeBridge) RecvMsg(m any) error            { return nil }
+func (b *writeBridge) SetTrailer(metadata.MD)       {}
+func (b *writeBridge) Context() context.Context     { return b.ctx }
+func (b *writeBridge) SendMsg(m any) error          { return nil }
+func (b *writeBridge) RecvMsg(m any) error          { return nil }
 
 func (b *writeBridge) Send(resp *firestorev1.WriteResponse) error {
 	select {

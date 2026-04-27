@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/webchannel"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/webchannel"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,9 +48,9 @@ func TestWebChannel_CrossHandler_GET_DoesNotPanic(t *testing.T) {
 
 	// Establish a Write session via POST.
 	form := url.Values{
-		"count":            {"0"},
-		"ofs":              {"0"},
-		"req0___data__":   {`{"writes":[]}`},
+		"count":         {"0"},
+		"ofs":           {"0"},
+		"req0___data__": {`{"writes":[]}`},
 	}
 	postResp, err := http.PostForm(srv.URL+"/Write/channel?VER=8&RID=1", form)
 	require.NoError(t, err)
@@ -100,8 +100,8 @@ func TestWebChannel_CrossHandler_WriteGet_OnListenSession_DoesNotPanic(t *testin
 	t.Cleanup(srv.Close)
 
 	form := url.Values{
-		"count":          {"0"},
-		"ofs":            {"0"},
+		"count":         {"0"},
+		"ofs":           {"0"},
 		"req0___data__": {`{"database":"projects/p/databases/(default)"}`},
 	}
 	postResp, err := http.PostForm(srv.URL+"/Listen/channel?VER=8&RID=1", form)
@@ -140,8 +140,8 @@ func TestWebChannel_Manager_Shutdown_CancelsActiveSessions(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	form := url.Values{
-		"count":          {"0"},
-		"ofs":            {"0"},
+		"count":         {"0"},
+		"ofs":           {"0"},
 		"req0___data__": {`{"database":"projects/p/databases/(default)"}`},
 	}
 	resp, err := http.PostForm(srv.URL+"?VER=8&RID=1", form)

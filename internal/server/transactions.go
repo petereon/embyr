@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

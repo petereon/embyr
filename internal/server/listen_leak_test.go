@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

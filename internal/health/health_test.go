@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/petereon/firstyr/internal/health"
+	"github.com/petereon/embyr/internal/health"
 	"github.com/stretchr/testify/assert"
 )
 

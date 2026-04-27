@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
 	"github.com/stretchr/testify/require"
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc/codes"
@@ -79,7 +79,7 @@ func TestBatchWrite_AppliesTransforms_Increment(t *testing.T) {
 	_, err = client.BatchWrite(ctx, &firestorev1.BatchWriteRequest{
 		Database: "projects/p/databases/(default)",
 		Writes: []*firestorev1.Write{{
-			Operation: &firestorev1.Write_Update{Update: &firestorev1.Document{Name: path}},
+			Operation:  &firestorev1.Write_Update{Update: &firestorev1.Document{Name: path}},
 			UpdateMask: &firestorev1.DocumentMask{FieldPaths: []string{}},
 			UpdateTransforms: []*firestorev1.DocumentTransform_FieldTransform{{
 				FieldPath: "counter",

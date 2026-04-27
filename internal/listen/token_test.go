@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petereon/firstyr/internal/listen"
+	"github.com/petereon/embyr/internal/listen"
 	"github.com/stretchr/testify/require"
 )
 

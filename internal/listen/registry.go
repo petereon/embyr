@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/petereon/firstyr/internal/store"
+	"github.com/petereon/embyr/internal/store"
 )
 
 // subscription is a single registered consumer plus a flag the registry sets

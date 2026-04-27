@@ -1,13 +1,13 @@
 .PHONY: proto build test lint clean
 
-BINARY=firstyr
-MODULE=github.com/petereon/firstyr
+BINARY=embyr
+MODULE=github.com/petereon/embyr
 
 proto:
 	buf generate
 
 build:
-	CGO_ENABLED=0 go build -o $(BINARY) ./cmd/firstyr
+	CGO_ENABLED=0 go build -o $(BINARY) ./cmd/embyr
 
 test:
 	go test ./... -v -count=1

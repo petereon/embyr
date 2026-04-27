@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"github.com/petereon/firstyr/internal/store"
+	"github.com/petereon/embyr/internal/store"
 	"github.com/stretchr/testify/assert"
 )
 

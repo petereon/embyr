@@ -1,14 +1,14 @@
-# firstyr — Wire Contract
+# embyr — Wire Contract
 
-This document is the authoritative description of every request/response format firstyr speaks. It covers four transports — gRPC, gRPC-Web, REST (grpc-gateway + custom interceptors), and BrowserChannel/WebChannel — and the shared semantics layered on top: documents, paths, filters, transforms, transactions, listen streams, auth.
+This document is the authoritative description of every request/response format embyr speaks. It covers four transports — gRPC, gRPC-Web, REST (grpc-gateway + custom interceptors), and BrowserChannel/WebChannel — and the shared semantics layered on top: documents, paths, filters, transforms, transactions, listen streams, auth.
 
-Where the contract diverges from real Firestore (or has known limitations), the section is flagged with **⚠**. Where firstyr re-derived a non-public detail (e.g. the chunk framing the SDK requires), the section is flagged with **🔍**.
+Where the contract diverges from real Firestore (or has known limitations), the section is flagged with **⚠**. Where embyr re-derived a non-public detail (e.g. the chunk framing the SDK requires), the section is flagged with **🔍**.
 
 ---
 
 ## 1. Transports
 
-firstyr exposes the Firestore service on two TCP listeners:
+embyr exposes the Firestore service on two TCP listeners:
 
 - `:cfg.Server.GRPCPort` — pure gRPC over HTTP/2, no TLS by default. mTLS available via `auth.mode = mtls`.
 - `:cfg.Server.RESTPort` — HTTP/1.1 multiplexed across:
@@ -17,7 +17,7 @@ firstyr exposes the Firestore service on two TCP listeners:
   - **BrowserChannel/WebChannel** — long-poll forward + back channel for `Listen` and `Write` streams (browsers can't speak HTTP/2 streaming reliably).
   - **Health** — `GET /healthz` and `GET /readyz`.
 
-The REST port's request router is in <ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/server/server.go" />:
+The REST port's request router is in <ref_file file="/Users/peter.vyboch/utilities/embyr/internal/server/server.go" />:
 
 ```
 combinedHandler:
@@ -79,7 +79,7 @@ projects/{project}/databases/{database}/documents/{collection}/{docId}[/{coll}/{
 
 ### Document encoding
 
-Stored row layout (`store.Document` in <ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/store/doc.go" />):
+Stored row layout (`store.Document` in <ref_file file="/Users/peter.vyboch/utilities/embyr/internal/store/doc.go" />):
 
 | field | type | meaning |
 |---|---|---|
@@ -112,7 +112,7 @@ Both the SQL layer (`sqliteFieldBase`/`pgFieldBase`) and the in-memory live-upda
 
 ## 3. Values
 
-`Value` proto (REST/proto3-JSON) variants firstyr understands:
+`Value` proto (REST/proto3-JSON) variants embyr understands:
 
 | variant | JSON shape (REST) | store.FilterValueKind |
 |---|---|---|
@@ -131,7 +131,7 @@ Cross-type numeric compare: `int` ↔ `double` are compared after promoting to a
 
 ## 4. gRPC service `google.firestore.v1.Firestore`
 
-All RPCs are implemented in <ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/server/handlers.go" />, <ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/server/transactions.go" />, <ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/server/listen.go" />, and <ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/server/aggregation.go" />.
+All RPCs are implemented in <ref_file file="/Users/peter.vyboch/utilities/embyr/internal/server/handlers.go" />, <ref_file file="/Users/peter.vyboch/utilities/embyr/internal/server/transactions.go" />, <ref_file file="/Users/peter.vyboch/utilities/embyr/internal/server/listen.go" />, and <ref_file file="/Users/peter.vyboch/utilities/embyr/internal/server/aggregation.go" />.
 
 ### 4.1 Unary RPCs
 
@@ -160,7 +160,7 @@ All RPCs are implemented in <ref_file file="/Users/peter.vyboch/utilities/firsty
 
 `Listen` — see §6.
 
-`Write` — three-step protocol (<ref_snippet file="/Users/peter.vyboch/utilities/firstyr/internal/server/handlers.go" lines="412-474" />):
+`Write` — three-step protocol (<ref_snippet file="/Users/peter.vyboch/utilities/embyr/internal/server/handlers.go" lines="412-474" />):
 
 1. Client sends a handshake `WriteRequest` (empty `writes`, empty `stream_id`).
 2. Server replies with a `WriteResponse{stream_id: <16-hex unixnano>, stream_token: <RFC3339Nano>, commit_time}`. No `write_results`.
@@ -241,7 +241,7 @@ Per-write semantics are identical to `Commit` non-tx (mask, transforms, precondi
 
 ### 4.8 Filter operators
 
-`store.FilterOp` enum defined in <ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/store/query.go" />:
+`store.FilterOp` enum defined in <ref_file file="/Users/peter.vyboch/utilities/embyr/internal/store/query.go" />:
 
 ```
 ==  !=  <  <=  >  >=
@@ -272,11 +272,11 @@ Page tokens are opaque; format is `base64.RawURLEncoding(decimal_offset)`. `stor
 
 ## 5. REST (HTTP/JSON via grpc-gateway + custom interceptors)
 
-The grpc-gateway mux serves the standard Firestore REST mappings. firstyr **intercepts** three of those paths because the JS SDK expects a JSON-array body that grpc-gateway's NDJSON streaming wouldn't produce.
+The grpc-gateway mux serves the standard Firestore REST mappings. embyr **intercepts** three of those paths because the JS SDK expects a JSON-array body that grpc-gateway's NDJSON streaming wouldn't produce.
 
 ### 5.1 grpc-gateway-served routes
 
-URL templates from <ref_file file="/Users/peter.vyboch/utilities/firstyr/gen/go/google/firestore/v1/firestore.pb.gw.go" />:
+URL templates from <ref_file file="/Users/peter.vyboch/utilities/embyr/gen/go/google/firestore/v1/firestore.pb.gw.go" />:
 
 | Method | URL | RPC |
 |---|---|---|
@@ -365,7 +365,7 @@ Five message variants:
 {"documentDelete": {"document": path, "removedTargetIds":[id, …], "readTime":…}}
 ```
 
-Resume tokens are `base64.RawURLEncoding(time.UTC().Format(RFC3339Nano))` (`internal/listen/token.go`). The token's only meaning to firstyr is "this is the read-time"; it is not used for replay. ⚠ Resume from a token is not implemented; clients reconnecting do a full re-snapshot.
+Resume tokens are `base64.RawURLEncoding(time.UTC().Format(RFC3339Nano))` (`internal/listen/token.go`). The token's only meaning to embyr is "this is the read-time"; it is not used for replay. ⚠ Resume from a token is not implemented; clients reconnecting do a full re-snapshot.
 
 ### 6.3 Snapshot delivery (per `addTarget`)
 
@@ -518,7 +518,7 @@ Each chunk on either the new-session POST response body or the back-channel stre
 <decimal byte length>\n<UTF-8 JSON>
 ```
 
-Multiple chunks concatenate without delimiters. The JSON is **always** an array of `[seq, payload]` pairs. firstyr emits exactly one pair per chunk except for the connect chunk which emits two.
+Multiple chunks concatenate without delimiters. The JSON is **always** an array of `[seq, payload]` pairs. embyr emits exactly one pair per chunk except for the connect chunk which emits two.
 
 #### Connect chunk (`Session.FormatConnectChunk`)
 
@@ -563,14 +563,14 @@ The session bridge contexts are derived from `context.Background()` so that the 
 
 ## 8. Authentication
 
-Configured via `cfg.Auth.Mode` (<ref_file file="/Users/peter.vyboch/utilities/firstyr/internal/auth/interceptor.go" />). Applied as gRPC unary + stream interceptors; gRPC-Web inherits the same. REST and WebChannel are **not** interceptor-protected — they sit behind the same `:RESTPort` listener with no per-request auth check (gRPC-Web requests do go through the gRPC interceptor since they hit the wrapped server).
+Configured via `cfg.Auth.Mode` (<ref_file file="/Users/peter.vyboch/utilities/embyr/internal/auth/interceptor.go" />). Applied as gRPC unary + stream interceptors; gRPC-Web inherits the same. REST and WebChannel are **not** interceptor-protected — they sit behind the same `:RESTPort` listener with no per-request auth check (gRPC-Web requests do go through the gRPC interceptor since they hit the wrapped server).
 
 | mode | required config | how the bearer is taken | what's validated |
 |---|---|---|---|
 | `none`, `""` | — | — | nothing |
 | `key` | `auth.key` | gRPC metadata `authorization: Bearer <key>` | constant-time `==` against `cfg.Auth.Key` |
 | `google` | `auth.google_project_id` | gRPC metadata `authorization: Bearer <token>` | calls Google's `tokeninfo` endpoint with `?id_token=…` first; on 4xx falls back to `?access_token=…`. ID-token path requires `audience` / `aud` / `azp` to equal `cfg.Auth.GoogleProjectID`. Access-token success returns OK regardless of project (response shape doesn't carry project id). |
-| `mtls` | `auth.mtls_ca`, `server.tls.cert`, `server.tls.key` | TLS peer | requires `state.VerifiedChains` non-empty (any client cert signed by `auth.mtls_ca` is accepted; firstyr does not check Subject/CN). |
+| `mtls` | `auth.mtls_ca`, `server.tls.cert`, `server.tls.key` | TLS peer | requires `state.VerifiedChains` non-empty (any client cert signed by `auth.mtls_ca` is accepted; embyr does not check Subject/CN). |
 
 Errors are `codes.Unauthenticated`. Failure to construct credentials at startup (missing CA, missing key, etc.) returns from `auth.New` and prevents the server from starting.
 
@@ -580,7 +580,7 @@ The `tokeninfo` URL is overridable via `auth.SetTokenInfoURL` for tests.
 
 ## 9. Configuration
 
-Loaded by `internal/config.Load` from a YAML file (path via `-config` flag) plus env vars (`FIRSTYR_*`). Validated by `(*Config).Validate`.
+Loaded by `internal/config.Load` from a YAML file (path via `-config` flag) plus env vars (`EMBYR_*`). Validated by `(*Config).Validate`.
 
 ```yaml
 server:
@@ -600,7 +600,7 @@ auth:
 backend:
   type: "sqlite"              # sqlite | postgres
   sqlite:
-    path: "firstyr.db"
+    path: "embyr.db"
   postgres:
     dsn: ""                   # postgres://user:pass@host:port/db?sslmode=…
     max_conns: 25             # 0 = sql package default
@@ -614,7 +614,7 @@ log:
   format: "json"              # json | <anything else> = development
 ```
 
-Env-var binding uses lowerCamelCase → SCREAMING_SNAKE: `FIRSTYR_SERVER_GRPC_PORT`, `FIRSTYR_AUTH_KEY`, `FIRSTYR_BACKEND_POSTGRES_DSN`, etc.
+Env-var binding uses lowerCamelCase → SCREAMING_SNAKE: `EMBYR_SERVER_GRPC_PORT`, `EMBYR_AUTH_KEY`, `EMBYR_BACKEND_POSTGRES_DSN`, etc.
 
 ---
 
@@ -643,7 +643,7 @@ transactions(
 );
 ```
 
-Postgres has GIN index on `data`, BTREE on `collection`, `parent`, `updated_at`. Postgres also has the `notify_doc_change` trigger that fires `pg_notify('doc_changes', payload)` on every documents row change; firstyr `Subscribe` listens to that channel.
+Postgres has GIN index on `data`, BTREE on `collection`, `parent`, `updated_at`. Postgres also has the `notify_doc_change` trigger that fires `pg_notify('doc_changes', payload)` on every documents row change; embyr `Subscribe` listens to that channel.
 
 ### 10.2 OCC contract
 

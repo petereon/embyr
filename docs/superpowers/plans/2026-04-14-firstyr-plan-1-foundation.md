@@ -1,4 +1,4 @@
-# firstyr — Plan 1: Foundation & Protocol Scaffold
+# embyr — Plan 1: Foundation & Protocol Scaffold
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.22, buf v2 (proto codegen), grpc-gateway v2, modernc.org/sqlite (pure-Go, no CGo), pgx/v5 (PostgreSQL), golang-migrate/migrate/v4 (schema migrations), viper (config YAML + env vars), zap (structured logging), testify (assertions)
 
-> **Note on module path:** Steps below use `github.com/firstyr/firstyr`. Replace this with your actual GitHub path before running `go mod init`.
+> **Note on module path:** Steps below use `github.com/embyr/embyr`. Replace this with your actual GitHub path before running `go mod init`.
 
 > **This is Plan 1 of 5.** Plans 2–5 build on this foundation:
 > - Plan 2: Document CRUD + Auth middleware
@@ -21,8 +21,8 @@
 ## File Map
 
 ```
-firstyr/
-├── cmd/firstyr/main.go                        # Binary entry point
+embyr/
+├── cmd/embyr/main.go                        # Binary entry point
 ├── internal/
 │   ├── config/
 │   │   ├── config.go                          # Config struct + Load()
@@ -67,16 +67,16 @@ firstyr/
 - [ ] **Step 1: Initialize the Go module**
 
 ```bash
-cd /path/to/firstyr
-go mod init github.com/firstyr/firstyr
+cd /path/to/embyr
+go mod init github.com/embyr/embyr
 ```
 
-Expected output: `go: creating new go.mod: module github.com/firstyr/firstyr`
+Expected output: `go: creating new go.mod: module github.com/embyr/embyr`
 
 - [ ] **Step 2: Create the directory structure**
 
 ```bash
-mkdir -p cmd/firstyr
+mkdir -p cmd/embyr
 mkdir -p internal/config
 mkdir -p internal/store/sqlite
 mkdir -p internal/store/postgres
@@ -93,7 +93,7 @@ Append to the existing `.gitignore`:
 
 ```
 # Go binaries
-firstyr
+embyr
 /dist/
 
 # Go test cache
@@ -108,14 +108,14 @@ firstyr
 ```makefile
 .PHONY: proto build test lint clean
 
-BINARY=firstyr
-MODULE=github.com/firstyr/firstyr
+BINARY=embyr
+MODULE=github.com/embyr/embyr
 
 proto:
 	buf generate
 
 build:
-	CGO_ENABLED=0 go build -o $(BINARY) ./cmd/firstyr
+	CGO_ENABLED=0 go build -o $(BINARY) ./cmd/embyr
 
 test:
 	go test ./... -v -count=1
@@ -259,7 +259,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/firstyr/firstyr/internal/config"
+	"github.com/embyr/embyr/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -307,8 +307,8 @@ backend:
 }
 
 func TestLoad_EnvOverride(t *testing.T) {
-	t.Setenv("FIRSTYR_AUTH_KEY", "env-override-key")
-	t.Setenv("FIRSTYR_BACKEND_TYPE", "sqlite")
+	t.Setenv("EMBYR_AUTH_KEY", "env-override-key")
+	t.Setenv("EMBYR_BACKEND_TYPE", "sqlite")
 
 	cfg, err := config.Load("")
 	require.NoError(t, err)
@@ -396,8 +396,8 @@ type LogConfig struct {
 }
 
 // Load reads a YAML config file (path may be empty for defaults only).
-// Environment variables prefixed with FIRSTYR_ override any config file value.
-// Key mapping: FIRSTYR_AUTH_KEY → auth.key, FIRSTYR_BACKEND_TYPE → backend.type
+// Environment variables prefixed with EMBYR_ override any config file value.
+// Key mapping: EMBYR_AUTH_KEY → auth.key, EMBYR_BACKEND_TYPE → backend.type
 func Load(path string) (*Config, error) {
 	v := viper.New()
 
@@ -406,7 +406,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("server.rest_port", 8081)
 	v.SetDefault("auth.mode", "none")
 	v.SetDefault("backend.type", "sqlite")
-	v.SetDefault("backend.sqlite.path", "firstyr.db")
+	v.SetDefault("backend.sqlite.path", "embyr.db")
 	v.SetDefault("backend.postgres.max_conns", 25)
 	v.SetDefault("transactions.ttl", "60s")
 	v.SetDefault("transactions.sweep_interval", "30s")
@@ -414,7 +414,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("log.format", "json")
 
 	// Env vars
-	v.SetEnvPrefix("FIRSTYR")
+	v.SetEnvPrefix("EMBYR")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
@@ -649,7 +649,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/firstyr/firstyr/internal/store/sqlite"
+	"github.com/embyr/embyr/internal/store/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -815,7 +815,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/firstyr/firstyr/internal/store/postgres"
+	"github.com/embyr/embyr/internal/store/postgres"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -986,7 +986,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/firstyr/firstyr/internal/health"
+	"github.com/embyr/embyr/internal/health"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -1127,9 +1127,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/firstyr/firstyr/internal/config"
-	"github.com/firstyr/firstyr/internal/server"
-	"github.com/firstyr/firstyr/internal/store/sqlite"
+	"github.com/embyr/embyr/internal/config"
+	"github.com/embyr/embyr/internal/server"
+	"github.com/embyr/embyr/internal/store/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -1210,10 +1210,10 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/firstyr/firstyr/internal/config"
-	"github.com/firstyr/firstyr/internal/health"
-	"github.com/firstyr/firstyr/internal/store"
-	firestorev1 "github.com/firstyr/firstyr/gen/go/google/firestore/v1"
+	"github.com/embyr/embyr/internal/config"
+	"github.com/embyr/embyr/internal/health"
+	"github.com/embyr/embyr/internal/store"
+	firestorev1 "github.com/embyr/embyr/gen/go/google/firestore/v1"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -1349,12 +1349,12 @@ git commit -m "feat: add gRPC + grpc-gateway REST server scaffold"
 ## Task 10: Binary Entry Point
 
 **Files:**
-- Create: `cmd/firstyr/main.go`
+- Create: `cmd/embyr/main.go`
 
 - [ ] **Step 1: Write main.go**
 
 ```go
-// cmd/firstyr/main.go
+// cmd/embyr/main.go
 package main
 
 import (
@@ -1365,11 +1365,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/firstyr/firstyr/internal/config"
-	"github.com/firstyr/firstyr/internal/server"
-	"github.com/firstyr/firstyr/internal/store"
-	"github.com/firstyr/firstyr/internal/store/postgres"
-	"github.com/firstyr/firstyr/internal/store/sqlite"
+	"github.com/embyr/embyr/internal/config"
+	"github.com/embyr/embyr/internal/server"
+	"github.com/embyr/embyr/internal/store"
+	"github.com/embyr/embyr/internal/store/postgres"
+	"github.com/embyr/embyr/internal/store/sqlite"
 	"go.uber.org/zap"
 )
 
@@ -1379,7 +1379,7 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("firstyr: load config: %v", err)
+		log.Fatalf("embyr: load config: %v", err)
 	}
 
 	var zapCfg zap.Config
@@ -1390,7 +1390,7 @@ func main() {
 	}
 	logger, err := zapCfg.Build()
 	if err != nil {
-		log.Fatalf("firstyr: build logger: %v", err)
+		log.Fatalf("embyr: build logger: %v", err)
 	}
 	defer logger.Sync()
 
@@ -1428,7 +1428,7 @@ func main() {
 		logger.Fatal("server: new", zap.Error(err))
 	}
 
-	logger.Info("firstyr starting",
+	logger.Info("embyr starting",
 		zap.Int("grpc_port", cfg.Server.GRPCPort),
 		zap.Int("rest_port", cfg.Server.RESTPort),
 		zap.String("backend", cfg.Backend.Type),
@@ -1447,12 +1447,12 @@ func main() {
 make build
 ```
 
-Expected: `firstyr` binary produced in the project root, exits 0.
+Expected: `embyr` binary produced in the project root, exits 0.
 
 - [ ] **Step 3: Smoke test with SQLite backend**
 
 ```bash
-./firstyr --config /dev/null &
+./embyr --config /dev/null &
 sleep 1
 curl -s http://localhost:8081/healthz
 ```
@@ -1482,8 +1482,8 @@ Expected: all tests pass (PostgreSQL tests skipped if no DSN).
 - [ ] **Step 6: Final commit**
 
 ```bash
-git add cmd/firstyr/main.go go.mod go.sum
-git commit -m "feat: add binary entry point — firstyr starts and serves health endpoints"
+git add cmd/embyr/main.go go.mod go.sum
+git commit -m "feat: add binary entry point — embyr starts and serves health endpoints"
 ```
 
 ---
@@ -1492,9 +1492,9 @@ git commit -m "feat: add binary entry point — firstyr starts and serves health
 
 Before declaring Plan 1 complete, confirm:
 
-- [ ] `make build` produces a static binary (`file firstyr` shows `statically linked`)
+- [ ] `make build` produces a static binary (`file embyr` shows `statically linked`)
 - [ ] `go test ./...` passes with zero failures (skips allowed for PostgreSQL)
-- [ ] `./firstyr` starts, `/healthz` returns `ok`, `/readyz` returns `ok`
+- [ ] `./embyr` starts, `/healthz` returns `ok`, `/readyz` returns `ok`
 - [ ] gRPC server responds (any RPC returns `UNIMPLEMENTED`, not a connection error): `grpcurl -plaintext localhost:8080 list`
 - [ ] REST gateway responds: `curl http://localhost:8081/v1/projects/p/databases/d/documents` returns a JSON error (not a connection refused)
 - [ ] `buf generate` is repeatable — running it twice produces identical output

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/store"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"

@@ -1,11 +1,11 @@
-# firstyr — Firestore Compatibility Proxy Design
+# embyr — Firestore Compatibility Proxy Design
 
 **Date:** 2026-04-14
 **Status:** Approved
 
 ## Overview
 
-firstyr is a language-agnostic drop-in replacement for Google Cloud Firestore. It runs as a standalone proxy that speaks the Firestore wire protocol (gRPC + REST), backed by either SQLite or PostgreSQL. Applications change only their endpoint URL and credentials — no code changes required.
+embyr is a language-agnostic drop-in replacement for Google Cloud Firestore. It runs as a standalone proxy that speaks the Firestore wire protocol (gRPC + REST), backed by either SQLite or PostgreSQL. Applications change only their endpoint URL and credentials — no code changes required.
 
 ---
 
@@ -209,12 +209,12 @@ log:
   format: json       # json | text
 ```
 
-Environment variables override config file values. All keys map to `FIRSTYR_<SECTION>_<KEY>` (e.g. `FIRSTYR_AUTH_KEY`).
+Environment variables override config file values. All keys map to `EMBYR_<SECTION>_<KEY>` (e.g. `EMBYR_AUTH_KEY`).
 
 ### Standalone Binary
 
 ```
-firstyr [--config config.yaml] [--grpc-port 8080] [--rest-port 8081] [--backend sqlite] [--auth none]
+embyr [--config config.yaml] [--grpc-port 8080] [--rest-port 8081] [--backend sqlite] [--auth none]
 ```
 
 Flags override config file values. Built as a fully static binary (`CGO_ENABLED=0`) using `modernc.org/sqlite`.
@@ -223,8 +223,8 @@ Flags override config file values. Built as a fully static binary (`CGO_ENABLED=
 
 ```dockerfile
 FROM gcr.io/distroless/static
-COPY firstyr /firstyr
-ENTRYPOINT ["/firstyr"]
+COPY embyr /embyr
+ENTRYPOINT ["/embyr"]
 ```
 
 Config mounted as a volume or provided entirely via environment variables.

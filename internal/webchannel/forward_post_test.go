@@ -11,13 +11,15 @@ import (
 	"strings"
 	"testing"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/webchannel"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/webchannel"
 	"github.com/stretchr/testify/require"
 )
 
 // Forward POST response must be in WebChannel chunk-framed format:
-//   <byte_length>\n<json_array>
+//
+//	<byte_length>\n<json_array>
+//
 // where the JSON is a 3-element array. Without the length prefix the SDK's
 // chunk extractor (Sb in @firebase/webchannel-wrapper) returns "incomplete"
 // and marks the request failed, which blocks every subsequent forward send
@@ -34,8 +36,8 @@ func TestWebChannel_ForwardPostResponse_IsChunkFramed3ElementArray(t *testing.T)
 
 	// 1) Establish a session via new-session POST.
 	form := url.Values{
-		"count":          {"0"},
-		"ofs":            {"0"},
+		"count":         {"0"},
+		"ofs":           {"0"},
 		"req0___data__": {`{"database":"projects/demo/databases/(default)"}`},
 	}
 	resp, err := http.PostForm(srv.URL+"?VER=8&RID=1", form)

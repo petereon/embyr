@@ -4,9 +4,9 @@ import (
 	"math"
 	"testing"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/codec"
-	"github.com/petereon/firstyr/internal/store"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/codec"
+	"github.com/petereon/embyr/internal/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -107,8 +107,9 @@ func TestMatchesFilter_MissingField_NotIn_Excluded(t *testing.T) {
 // #LIVE-INT64 — comparing large int64 values must not lose precision via float64.
 //
 // Picked values:
-//   docVal  = 2^53 + 1  (not exactly representable as float64; rounds to 2^53)
-//   threshold = 2^53    (exactly representable as float64)
+//
+//	docVal  = 2^53 + 1  (not exactly representable as float64; rounds to 2^53)
+//	threshold = 2^53    (exactly representable as float64)
 //
 // Sanity: float64(docVal) == float64(threshold).  So any compare that goes
 // through float64 returns "equal" instead of "greater". The integer compare

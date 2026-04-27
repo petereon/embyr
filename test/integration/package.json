@@ -1,5 +1,5 @@
 {
-  "name": "firstyr-integration",
+  "name": "embyr-integration",
   "type": "module",
   "scripts": {
     "test": "vitest run",

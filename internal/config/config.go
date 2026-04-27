@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Config holds the complete runtime configuration for firstyr.
+// Config holds the complete runtime configuration for embyr.
 type Config struct {
 	Server       ServerConfig      `mapstructure:"server"`
 	Auth         AuthConfig        `mapstructure:"auth"`
@@ -19,11 +19,11 @@ type Config struct {
 
 // ServerConfig controls the gRPC and REST listener ports and optional TLS.
 type ServerConfig struct {
-	GRPCPort       int       `mapstructure:"grpc_port"`
-	RESTPort       int       `mapstructure:"rest_port"`
-	TLS            TLSConfig `mapstructure:"tls"`
+	GRPCPort int       `mapstructure:"grpc_port"`
+	RESTPort int       `mapstructure:"rest_port"`
+	TLS      TLSConfig `mapstructure:"tls"`
 	// AllowedOrigins lists CORS origins. Empty slice = allow all (dev default).
-	AllowedOrigins []string  `mapstructure:"allowed_origins"`
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
 // TLSConfig holds paths to the server certificate and private key.
@@ -71,8 +71,8 @@ type LogConfig struct {
 }
 
 // Load reads a YAML config file (path may be empty for defaults only).
-// Environment variables prefixed with FIRSTYR_ override any config file value.
-// Key mapping: FIRSTYR_AUTH_KEY -> auth.key, FIRSTYR_BACKEND_TYPE -> backend.type
+// Environment variables prefixed with EMBYR_ override any config file value.
+// Key mapping: EMBYR_AUTH_KEY -> auth.key, EMBYR_BACKEND_TYPE -> backend.type
 func Load(path string) (*Config, error) {
 	v := viper.New()
 
@@ -80,14 +80,14 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("server.rest_port", 8081)
 	v.SetDefault("auth.mode", "none")
 	v.SetDefault("backend.type", "sqlite")
-	v.SetDefault("backend.sqlite.path", "firstyr.db")
+	v.SetDefault("backend.sqlite.path", "embyr.db")
 	v.SetDefault("backend.postgres.max_conns", 25)
 	v.SetDefault("transactions.ttl", 60*time.Second)
 	v.SetDefault("transactions.sweep_interval", 30*time.Second)
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
 
-	v.SetEnvPrefix("FIRSTYR")
+	v.SetEnvPrefix("EMBYR")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 

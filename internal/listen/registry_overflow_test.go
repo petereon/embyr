@@ -3,8 +3,8 @@ package listen_test
 import (
 	"testing"
 
-	"github.com/petereon/firstyr/internal/listen"
-	"github.com/petereon/firstyr/internal/store"
+	"github.com/petereon/embyr/internal/listen"
+	"github.com/petereon/embyr/internal/store"
 	"github.com/stretchr/testify/require"
 )
 

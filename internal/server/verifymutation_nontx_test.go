@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
 	"github.com/stretchr/testify/require"
 )
 

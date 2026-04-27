@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/petereon/firstyr/internal/config"
+	"github.com/petereon/embyr/internal/config"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

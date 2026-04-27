@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-	"github.com/petereon/firstyr/internal/config"
-	"github.com/petereon/firstyr/internal/server"
-	"github.com/petereon/firstyr/internal/store/sqlite"
+	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"github.com/petereon/embyr/internal/config"
+	"github.com/petereon/embyr/internal/server"
+	"github.com/petereon/embyr/internal/store/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -25,8 +25,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -1439,7 +1439,7 @@ func bcReadChunks(r io.Reader, maxChunks int, ch chan<- bcChunk) {
 //  5. Assert document persisted with createdAt timestamp field
 func TestBrowserChannel_Write_AddDocWithServerTimestamp(t *testing.T) {
 	ts := startTestServer(t)
-	const db     = "projects/p/databases/(default)"
+	const db = "projects/p/databases/(default)"
 	const parent = db + "/documents"
 	writeURL := ts.restBase + "/google.firestore.v1.Firestore/Write/channel"
 
@@ -1548,7 +1548,7 @@ func TestBrowserChannel_Write_AddDocWithServerTimestamp(t *testing.T) {
 // the Listen back channel.
 func TestBrowserChannel_Listen_ReceivesChangeAfterWrite(t *testing.T) {
 	ts := startTestServer(t)
-	const db     = "projects/p/databases/(default)"
+	const db = "projects/p/databases/(default)"
 	const parent = db + "/documents"
 	listenURL := ts.restBase + "/google.firestore.v1.Firestore/Listen/channel"
 

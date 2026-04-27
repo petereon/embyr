@@ -2,7 +2,8 @@ package store_test
 
 import (
 	"testing"
-	"github.com/petereon/firstyr/internal/store"
+
+	"github.com/petereon/embyr/internal/store"
 	"github.com/stretchr/testify/require"
 )
 

@@ -1,4 +1,4 @@
-# firstyr Plan 4 — Real-time Listeners (onSnapshot + BrowserChannel)
+# embyr Plan 4 — Real-time Listeners (onSnapshot + BrowserChannel)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -44,7 +44,7 @@ package store_test
 
 import (
     "testing"
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
     "github.com/stretchr/testify/require"
 )
 
@@ -141,8 +141,8 @@ import (
     "testing"
     "time"
 
-    "github.com/petereon/firstyr/internal/listen"
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/listen"
+    "github.com/petereon/embyr/internal/store"
     "github.com/stretchr/testify/require"
 )
 
@@ -215,7 +215,7 @@ package listen
 import (
     "sync"
 
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
 )
 
 // Registry fan-outs DocChange events to all active subscribers.
@@ -617,7 +617,7 @@ In `DeleteDocument`, after the successful delete:
     return nil
 ```
 
-This approach is simpler than the WAL hook and equally correct for single-process use. The WAL hook would be needed only for detecting writes from other processes sharing the same SQLite file — not the firstyr use case.
+This approach is simpler than the WAL hook and equally correct for single-process use. The WAL hook would be needed only for detecting writes from other processes sharing the same SQLite file — not the embyr use case.
 
 - [ ] **Step 4: Run tests, verify they pass**
 
@@ -652,7 +652,7 @@ package listen_test
 import (
     "testing"
     "time"
-    "github.com/petereon/firstyr/internal/listen"
+    "github.com/petereon/embyr/internal/listen"
     "github.com/stretchr/testify/require"
 )
 
@@ -746,7 +746,7 @@ import (
     "testing"
     "time"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
     "github.com/stretchr/testify/require"
     "google.golang.org/grpc"
     "google.golang.org/grpc/credentials/insecure"
@@ -933,10 +933,10 @@ import (
     "io"
     "time"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/codec"
-    "github.com/petereon/firstyr/internal/listen"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/codec"
+    "github.com/petereon/embyr/internal/listen"
+    "github.com/petereon/embyr/internal/store"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
     "google.golang.org/protobuf/types/known/timestamppb"
@@ -1170,7 +1170,7 @@ package webchannel_test
 
 import (
     "testing"
-    "github.com/petereon/firstyr/internal/webchannel"
+    "github.com/petereon/embyr/internal/webchannel"
     "github.com/stretchr/testify/require"
 )
 
@@ -1375,7 +1375,7 @@ import (
     "sync"
     "time"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
     "google.golang.org/grpc/metadata"
     "google.golang.org/protobuf/proto"
 )
@@ -1617,7 +1617,7 @@ Note: `fmt.Sprintf` is used in `parseForwardBody` but the import may need to be 
 In `New()`, after creating `fs` and the registry goroutine, create the webchannel handler and register it on the mux:
 
 ```go
-    import "github.com/petereon/firstyr/internal/webchannel"
+    import "github.com/petereon/embyr/internal/webchannel"
 
     wcMgr := webchannel.NewManager()
     wcHandler := webchannel.NewHandler(wcMgr, fs.Listen)
@@ -1672,7 +1672,7 @@ const app = initializeApp({
 export const db = getFirestore(app);
 
 // Vite proxies /v1/* (REST) and /google.firestore.v1.Firestore/* (gRPC-Web + BrowserChannel)
-// to http://localhost:17081 — firstyr handles both transports.
+// to http://localhost:17081 — embyr handles both transports.
 connectFirestoreEmulator(db, 'localhost', 5173);
 ```
 

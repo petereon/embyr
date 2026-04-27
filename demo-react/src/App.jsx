@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from "react";
 import {
   collection,
   doc,
@@ -15,27 +15,27 @@ import {
   arrayRemove,
   writeBatch,
   runTransaction,
-} from 'firebase/firestore';
-import { db } from './firebase.js';
+} from "firebase/firestore";
+import { db } from "./firebase.js";
 
-const COLL = 'notes';
-const CATEGORIES = ['general', 'idea', 'bug', 'todo'];
+const COLL = "notes";
+const CATEGORIES = ["general", "idea", "bug", "todo"];
 
 export default function App() {
-  const [notes, setNotes]         = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState(null);
-  const [text, setText]           = useState('');
-  const [category, setCategory]   = useState('general');
-  const [adding, setAdding]       = useState(false);
-  const [sortBy, setSortBy]       = useState('createdAt');
-  const [filterCat, setFilterCat] = useState('all');
-  const [selected, setSelected]   = useState(new Set());
+  const [notes, setNotes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [text, setText] = useState("");
+  const [category, setCategory] = useState("general");
+  const [adding, setAdding] = useState(false);
+  const [sortBy, setSortBy] = useState("createdAt");
+  const [filterCat, setFilterCat] = useState("all");
+  const [selected, setSelected] = useState(new Set());
   const [tagInputs, setTagInputs] = useState({});
-  const [ops, setOps]             = useState([]);
+  const [ops, setOps] = useState([]);
 
   function logOp(msg) {
-    setOps(prev => [msg, ...prev].slice(0, 6));
+    setOps((prev) => [msg, ...prev].slice(0, 6));
   }
 
   // Two-ref strategy for zero-gap, no-pending-target-removal listener swaps.
@@ -51,10 +51,10 @@ export default function App() {
   // immediately so we never accumulate more than 2 simultaneous listeners.
   //
   // genRef guards against stale snapshot callbacks updating state.
-  const cleanupRef     = useRef(null); // current active listener
-  const pendingRemRef  = useRef(null); // previous listener deferred until new is CURRENT
-  const genRef         = useRef(0);
-  const hasLoadedRef   = useRef(false);
+  const cleanupRef = useRef(null); // current active listener
+  const pendingRemRef = useRef(null); // previous listener deferred until new is CURRENT
+  const genRef = useRef(0);
+  const hasLoadedRef = useRef(false);
 
   // ── Live query ────────────────────────────────────────────────────────────
   // Rebuilt whenever sort or filter changes.
@@ -62,15 +62,16 @@ export default function App() {
   useEffect(() => {
     if (!hasLoadedRef.current) setLoading(true);
     const constraints = [];
-    if (filterCat !== 'all') constraints.push(where('category', '==', filterCat));
-    constraints.push(orderBy(sortBy, 'desc'));
+    if (filterCat !== "all")
+      constraints.push(where("category", "==", filterCat));
+    constraints.push(orderBy(sortBy, "desc"));
 
     const gen = ++genRef.current;
     const toDefer = cleanupRef.current;
 
     const newUnsub = onSnapshot(
       query(collection(db, COLL), ...constraints),
-      snap => {
+      (snap) => {
         // New listener is CURRENT — safe to remove the previous one now.
         if (pendingRemRef.current) {
           pendingRemRef.current();
@@ -79,11 +80,11 @@ export default function App() {
         // Ignore callbacks from superseded listeners.
         if (gen !== genRef.current) return;
         hasLoadedRef.current = true;
-        setNotes(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setNotes(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
         setLoading(false);
         setSelected(new Set());
       },
-      err => {
+      (err) => {
         if (gen !== genRef.current) return;
         setError(err.message);
         setLoading(false);
@@ -121,8 +122,8 @@ export default function App() {
         votes: 0,
         createdAt: serverTimestamp(),
       });
-      logOp('addDoc  { createdAt: serverTimestamp() }');
-      setText('');
+      logOp("addDoc  { createdAt: serverTimestamp() }");
+      setText("");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -134,7 +135,7 @@ export default function App() {
   async function handleVote(id, delta) {
     try {
       await updateDoc(doc(db, COLL, id), { votes: increment(delta) });
-      logOp(`updateDoc  { votes: increment(${delta > 0 ? '+' : ''}${delta}) }`);
+      logOp(`updateDoc  { votes: increment(${delta > 0 ? "+" : ""}${delta}) }`);
     } catch (err) {
       setError(err.message);
     }
@@ -142,12 +143,12 @@ export default function App() {
 
   // ── updateDoc + arrayUnion ────────────────────────────────────────────────
   async function handleAddTag(id) {
-    const tag = (tagInputs[id] || '').trim().replace(/^#+/, '');
+    const tag = (tagInputs[id] || "").trim().replace(/^#+/, "");
     if (!tag) return;
     try {
       await updateDoc(doc(db, COLL, id), { tags: arrayUnion(tag) });
       logOp(`updateDoc  { tags: arrayUnion("${tag}") }`);
-      setTagInputs(t => ({ ...t, [id]: '' }));
+      setTagInputs((t) => ({ ...t, [id]: "" }));
     } catch (err) {
       setError(err.message);
     }
@@ -167,7 +168,7 @@ export default function App() {
   async function handleDelete(id) {
     try {
       await deleteDoc(doc(db, COLL, id));
-      logOp('deleteDoc');
+      logOp("deleteDoc");
     } catch (err) {
       setError(err.message);
     }
@@ -180,7 +181,9 @@ export default function App() {
       const batch = writeBatch(db);
       for (const id of selected) batch.delete(doc(db, COLL, id));
       await batch.commit();
-      logOp(`writeBatch.commit()  — deleted ${selected.size} doc${selected.size > 1 ? 's' : ''}`);
+      logOp(
+        `writeBatch.commit()  — deleted ${selected.size} doc${selected.size > 1 ? "s" : ""}`,
+      );
       setSelected(new Set());
     } catch (err) {
       setError(err.message);
@@ -195,16 +198,23 @@ export default function App() {
     const ref = doc(db, COLL, id);
     try {
       let alreadyBoosted = false;
-      await runTransaction(db, async tx => {
+      await runTransaction(db, async (tx) => {
         const snap = await tx.get(ref);
-        if (!snap.exists()) throw new Error('Document was deleted');
-        if (snap.data().boosted) { alreadyBoosted = true; return; }
+        if (!snap.exists()) throw new Error("Document was deleted");
+        if (snap.data().boosted) {
+          alreadyBoosted = true;
+          return;
+        }
         tx.update(ref, { votes: (snap.data().votes || 0) + 10, boosted: true });
       });
       if (alreadyBoosted) {
-        setError('Already boosted — runTransaction read the flag and aborted the write.');
+        setError(
+          "Already boosted — runTransaction read the flag and aborted the write.",
+        );
       } else {
-        logOp('runTransaction  — read boosted flag → +10 votes, set boosted:true');
+        logOp(
+          "runTransaction  — read boosted flag → +10 votes, set boosted:true",
+        );
       }
     } catch (err) {
       setError(err.message);
@@ -212,7 +222,7 @@ export default function App() {
   }
 
   function toggleSelect(id) {
-    setSelected(prev => {
+    setSelected((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
@@ -220,25 +230,32 @@ export default function App() {
   }
 
   function formatTs(ts) {
-    if (!ts) return '…';
+    if (!ts) return "…";
     try {
       const d = ts.toDate ? ts.toDate() : new Date(ts);
-      return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      return d.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
     } catch {
       return String(ts);
     }
   }
 
-  const activeQuery = filterCat !== 'all'
-    ? `query(col, where('category','==','${filterCat}'), orderBy('${sortBy}','desc'))`
-    : `query(col, orderBy('${sortBy}','desc'))`;
+  const activeQuery =
+    filterCat !== "all"
+      ? `query(col, where('category','==','${filterCat}'), orderBy('${sortBy}','desc'))`
+      : `query(col, orderBy('${sortBy}','desc'))`;
 
   return (
     <div className="app">
       <header>
-        <h1>firstyr demo</h1>
+        <h1>embyr demo</h1>
         <p className="subtitle">
-          Firebase SDK → <code>connectFirestoreEmulator</code> → firstyr (Go) → SQLite/PostgreSQL
+          Firebase SDK → <code>connectFirestoreEmulator</code> → embyr (Go) →
+          SQLite/PostgreSQL
         </p>
       </header>
 
@@ -246,39 +263,70 @@ export default function App() {
       <form onSubmit={handleAdd} className="add-form">
         <input
           value={text}
-          onChange={e => setText(e.target.value)}
+          onChange={(e) => setText(e.target.value)}
           placeholder="New note…"
           disabled={adding}
           autoFocus
         />
-        <select value={category} onChange={e => setCategory(e.target.value)} disabled={adding}>
-          {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          disabled={adding}
+        >
+          {CATEGORIES.map((c) => (
+            <option key={c}>{c}</option>
+          ))}
         </select>
         <button type="submit" disabled={adding || !text.trim()}>
-          {adding ? '…' : 'Add'}
+          {adding ? "…" : "Add"}
         </button>
       </form>
 
       {error && (
-        <div className="error" onClick={() => setError(null)}>⚠ {error} <span className="dismiss">×</span></div>
+        <div className="error" onClick={() => setError(null)}>
+          ⚠ {error} <span className="dismiss">×</span>
+        </div>
       )}
 
       {/* ── Query controls ── */}
       <div className="controls">
         <div className="control-group">
           <span className="control-label">sort</span>
-          <button className={sortBy === 'createdAt' ? 'ctrl-btn active' : 'ctrl-btn'} onClick={() => setSortBy('createdAt')}>newest</button>
-          <button className={sortBy === 'votes'     ? 'ctrl-btn active' : 'ctrl-btn'} onClick={() => setSortBy('votes')}>top rated</button>
+          <button
+            className={sortBy === "createdAt" ? "ctrl-btn active" : "ctrl-btn"}
+            onClick={() => setSortBy("createdAt")}
+          >
+            newest
+          </button>
+          <button
+            className={sortBy === "votes" ? "ctrl-btn active" : "ctrl-btn"}
+            onClick={() => setSortBy("votes")}
+          >
+            top rated
+          </button>
         </div>
         <div className="control-group">
           <span className="control-label">filter</span>
-          <button className={filterCat === 'all' ? 'ctrl-btn active' : 'ctrl-btn'} onClick={() => setFilterCat('all')}>all</button>
-          {CATEGORIES.map(c => (
-            <button key={c} className={filterCat === c ? 'ctrl-btn active' : 'ctrl-btn'} onClick={() => setFilterCat(c)}>{c}</button>
+          <button
+            className={filterCat === "all" ? "ctrl-btn active" : "ctrl-btn"}
+            onClick={() => setFilterCat("all")}
+          >
+            all
+          </button>
+          {CATEGORIES.map((c) => (
+            <button
+              key={c}
+              className={filterCat === c ? "ctrl-btn active" : "ctrl-btn"}
+              onClick={() => setFilterCat(c)}
+            >
+              {c}
+            </button>
           ))}
         </div>
       </div>
-      <div className="query-hint"><code>{activeQuery}</code></div>
+      <div className="query-hint">
+        <code>{activeQuery}</code>
+      </div>
 
       {/* ── Notes ── */}
       {loading ? (
@@ -287,8 +335,13 @@ export default function App() {
         <p className="muted">No notes yet — add one above.</p>
       ) : (
         <ul className="notes">
-          {notes.map(note => (
-            <li key={note.id} className={selected.has(note.id) ? 'note-item selected' : 'note-item'}>
+          {notes.map((note) => (
+            <li
+              key={note.id}
+              className={
+                selected.has(note.id) ? "note-item selected" : "note-item"
+              }
+            >
               <input
                 type="checkbox"
                 className="note-check"
@@ -298,34 +351,66 @@ export default function App() {
 
               {/* Vote column */}
               <div className="vote-col">
-                <button className="vote-btn up" onClick={() => handleVote(note.id, 1)}>▲</button>
+                <button
+                  className="vote-btn up"
+                  onClick={() => handleVote(note.id, 1)}
+                >
+                  ▲
+                </button>
                 <span className="vote-count">{note.votes ?? 0}</span>
-                <button className="vote-btn down" onClick={() => handleVote(note.id, -1)}>▼</button>
+                <button
+                  className="vote-btn down"
+                  onClick={() => handleVote(note.id, -1)}
+                >
+                  ▼
+                </button>
               </div>
 
               {/* Body */}
               <div className="note-body">
                 <div className="note-top">
                   <span className="note-text">{note.text}</span>
-                  <span className={`cat-badge cat-${note.category || 'general'}`}>{note.category || 'general'}</span>
+                  <span
+                    className={`cat-badge cat-${note.category || "general"}`}
+                  >
+                    {note.category || "general"}
+                  </span>
                 </div>
 
                 {/* Tags */}
                 <div className="tag-row">
-                  {(note.tags || []).map(tag => (
+                  {(note.tags || []).map((tag) => (
                     <span key={tag} className="tag">
                       #{tag}
-                      <button className="tag-remove" onClick={() => handleRemoveTag(note.id, tag)}>×</button>
+                      <button
+                        className="tag-remove"
+                        onClick={() => handleRemoveTag(note.id, tag)}
+                      >
+                        ×
+                      </button>
                     </span>
                   ))}
-                  <form className="tag-form" onSubmit={e => { e.preventDefault(); handleAddTag(note.id); }}>
+                  <form
+                    className="tag-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleAddTag(note.id);
+                    }}
+                  >
                     <input
                       className="tag-input"
-                      value={tagInputs[note.id] || ''}
-                      onChange={e => setTagInputs(t => ({ ...t, [note.id]: e.target.value }))}
+                      value={tagInputs[note.id] || ""}
+                      onChange={(e) =>
+                        setTagInputs((t) => ({
+                          ...t,
+                          [note.id]: e.target.value,
+                        }))
+                      }
                       placeholder="#tag"
                     />
-                    <button type="submit" className="tag-add-btn">+</button>
+                    <button type="submit" className="tag-add-btn">
+                      +
+                    </button>
                   </form>
                 </div>
 
@@ -338,13 +423,23 @@ export default function App() {
               {/* Actions */}
               <div className="note-actions">
                 <button
-                  className={`btn-boost${note.boosted ? ' boosted' : ''}`}
+                  className={`btn-boost${note.boosted ? " boosted" : ""}`}
                   onClick={() => handleBoost(note.id)}
-                  title={note.boosted ? 'Already boosted (transaction will abort)' : 'runTransaction: read boosted flag → +10 if not yet boosted'}
+                  title={
+                    note.boosted
+                      ? "Already boosted (transaction will abort)"
+                      : "runTransaction: read boosted flag → +10 if not yet boosted"
+                  }
                 >
-                  {note.boosted ? '⚡done' : '⚡+10'}
+                  {note.boosted ? "⚡done" : "⚡+10"}
                 </button>
-                <button className="btn-delete" onClick={() => handleDelete(note.id)} aria-label="Delete">×</button>
+                <button
+                  className="btn-delete"
+                  onClick={() => handleDelete(note.id)}
+                  aria-label="Delete"
+                >
+                  ×
+                </button>
               </div>
             </li>
           ))}
@@ -358,7 +453,12 @@ export default function App() {
           <button className="batch-btn" onClick={handleBatchDelete}>
             writeBatch — delete {selected.size}
           </button>
-          <button className="batch-clear" onClick={() => setSelected(new Set())}>clear</button>
+          <button
+            className="batch-clear"
+            onClick={() => setSelected(new Set())}
+          >
+            clear
+          </button>
         </div>
       )}
 

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petereon/firstyr/internal/config"
+	"github.com/petereon/embyr/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,8 +54,8 @@ backend:
 }
 
 func TestLoad_EnvOverride(t *testing.T) {
-	t.Setenv("FIRSTYR_AUTH_KEY", "env-override-key")
-	t.Setenv("FIRSTYR_BACKEND_TYPE", "sqlite")
+	t.Setenv("EMBYR_AUTH_KEY", "env-override-key")
+	t.Setenv("EMBYR_BACKEND_TYPE", "sqlite")
 
 	cfg, err := config.Load("")
 	require.NoError(t, err)

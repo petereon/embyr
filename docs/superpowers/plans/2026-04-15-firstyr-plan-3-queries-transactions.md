@@ -1,4 +1,4 @@
-# firstyr Plan 3 — Advanced Queries, Field Transforms, Transactions, BatchWrite
+# embyr Plan 3 — Advanced Queries, Field Transforms, Transactions, BatchWrite
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -38,7 +38,7 @@ package store_test
 
 import (
     "testing"
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
     "github.com/stretchr/testify/require"
 )
 
@@ -184,9 +184,9 @@ package codec_test
 import (
     "testing"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/codec"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/codec"
+    "github.com/petereon/embyr/internal/store"
     "github.com/stretchr/testify/require"
 )
 
@@ -242,8 +242,8 @@ Expected: FAIL — `codec.FilterValueFromProto` undefined.
 package codec
 
 import (
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/store"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
 )
@@ -447,7 +447,7 @@ package store_test
 
 import (
     "testing"
-    "github.com/petereon/firstyr/internal/store"
+    "github.com/petereon/embyr/internal/store"
 )
 
 // TestStorageAdapterInterface verifies the expected methods exist on the interface.
@@ -1427,7 +1427,7 @@ func (s *firestoreServer) RunQuery(req *firestorev1.RunQueryRequest, stream fire
 }
 ```
 
-Add `"github.com/petereon/firstyr/internal/codec"` to the import if not already present (it should be).
+Add `"github.com/petereon/embyr/internal/codec"` to the import if not already present (it should be).
 
 - [ ] **Step 4: Run tests, verify they pass**
 
@@ -1773,9 +1773,9 @@ package server
 import (
     "context"
 
-    firestorev1 "github.com/petereon/firstyr/gen/go/google/firestore/v1"
-    "github.com/petereon/firstyr/internal/codec"
-    "github.com/petereon/firstyr/internal/store"
+    firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+    "github.com/petereon/embyr/internal/codec"
+    "github.com/petereon/embyr/internal/store"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
     "google.golang.org/protobuf/types/known/emptypb"

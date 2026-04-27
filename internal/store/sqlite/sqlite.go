@@ -18,7 +18,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "modernc.org/sqlite"
 
-	"github.com/petereon/firstyr/internal/store"
+	"github.com/petereon/embyr/internal/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

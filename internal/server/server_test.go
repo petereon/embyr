@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petereon/firstyr/internal/config"
-	"github.com/petereon/firstyr/internal/server"
-	"github.com/petereon/firstyr/internal/store/sqlite"
+	"github.com/petereon/embyr/internal/config"
+	"github.com/petereon/embyr/internal/server"
+	"github.com/petereon/embyr/internal/store/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
