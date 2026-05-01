@@ -1,0 +1,17 @@
+# Go binaries
+embyr
+/dist/
+
+# Go test cache
+*.test
+
+# Go build artifacts
+*.out
+
+# JS artifacts
+**/node_modules
+
+# Dev files
+embyr.db
+
+!cmd/embyr

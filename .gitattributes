@@ -1,0 +1,2 @@
+# Mark generated proto code so GitHub collapses it in diffs
+gen/** linguist-generated=true

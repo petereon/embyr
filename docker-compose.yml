@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: embyr
+      POSTGRES_PASSWORD: embyr
+      POSTGRES_DB: embyr
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U embyr"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  embyr:
+    build: .
+    ports:
+      - "17080:8080" # gRPC
+      - "17081:8081" # REST (grpc-gateway)
+    environment:
+      EMBYR_BACKEND_TYPE: postgres
+      EMBYR_BACKEND_POSTGRES_DSN: postgres://embyr:embyr@postgres:5432/embyr?sslmode=disable
+      EMBYR_AUTH_MODE: none
+      EMBYR_LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
