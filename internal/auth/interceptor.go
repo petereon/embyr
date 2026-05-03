@@ -43,15 +43,23 @@ type Config struct {
 	Stream grpc.StreamServerInterceptor
 	// Creds is the transport credentials to apply to the gRPC server.
 	// Nil for all modes except "mtls".
-	Creds credentials.TransportCredentials
+	Creds     credentials.TransportCredentials
+	mode      string
+	rawConfig []byte
 }
+
+// Mode returns the auth mode string for this config.
+func (c *Config) Mode() string { return c.mode }
+
+// RawConfig returns the raw auth config bytes.
+func (c *Config) RawConfig() []byte { return c.rawConfig }
 
 // New builds auth interceptors from the given configuration.
 // Returns an error if the configuration is invalid (e.g. key mode with no key set).
 func New(cfg *config.Config, _ *zap.Logger) (*Config, error) {
 	switch cfg.Auth.Mode {
 	case "none", "":
-		return &Config{Unary: noneUnary, Stream: noneStream}, nil
+		return &Config{Unary: noneUnary, Stream: noneStream, mode: "none"}, nil
 
 	case "key":
 		if cfg.Auth.Key == "" {
@@ -60,6 +68,7 @@ func New(cfg *config.Config, _ *zap.Logger) (*Config, error) {
 		return &Config{
 			Unary:  keyUnary(cfg.Auth.Key),
 			Stream: keyStream(cfg.Auth.Key),
+			mode:   "key",
 		}, nil
 
 	case "google":
@@ -69,6 +78,7 @@ func New(cfg *config.Config, _ *zap.Logger) (*Config, error) {
 		return &Config{
 			Unary:  googleUnary(cfg.Auth.GoogleProjectID),
 			Stream: googleStream(cfg.Auth.GoogleProjectID),
+			mode:   "google",
 		}, nil
 
 	case "mtls":
@@ -80,6 +90,7 @@ func New(cfg *config.Config, _ *zap.Logger) (*Config, error) {
 			Unary:  mtlsUnary,
 			Stream: mtlsStream,
 			Creds:  creds,
+			mode:   "mtls",
 		}, nil
 
 	default:
@@ -281,6 +292,36 @@ func validateMTLS(ctx context.Context) error {
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+// ValidateForTenant validates the incoming request token against a tenant's
+// stored auth mode and config. Used by the tenancy middleware.
+// rawConfig is a JSON object whose fields match config.AuthConfig json tags.
+func ValidateForTenant(ctx context.Context, mode string, rawConfig []byte) error {
+	switch mode {
+	case "none", "":
+		return nil
+	case "key":
+		var cfg struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
+			return status.Errorf(codes.Internal, "auth: parse key config: %v", err)
+		}
+		return validateKey(ctx, cfg.Key)
+	case "google":
+		var cfg struct {
+			GoogleProjectID string `json:"google_project_id"`
+		}
+		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
+			return status.Errorf(codes.Internal, "auth: parse google config: %v", err)
+		}
+		return validateGoogleToken(ctx, cfg.GoogleProjectID)
+	case "mtls":
+		return validateMTLS(ctx)
+	default:
+		return status.Errorf(codes.Unauthenticated, "auth: unknown mode %q", mode)
+	}
+}
 
 // bearerToken extracts the Bearer token from incoming gRPC metadata.
 func bearerToken(ctx context.Context) (string, error) {

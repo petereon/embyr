@@ -212,3 +212,31 @@ type mockServerStream struct {
 }
 
 func (m *mockServerStream) Context() context.Context { return m.ctx }
+
+func TestValidateForTenant_None(t *testing.T) {
+	err := auth.ValidateForTenant(context.Background(), "none", nil)
+	require.NoError(t, err)
+}
+
+func TestValidateForTenant_Key_Valid(t *testing.T) {
+	cfg := []byte(`{"key":"secret123"}`)
+	md := metadata.New(map[string]string{"authorization": "Bearer secret123"})
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+	err := auth.ValidateForTenant(ctx, "key", cfg)
+	require.NoError(t, err)
+}
+
+func TestValidateForTenant_Key_Invalid(t *testing.T) {
+	cfg := []byte(`{"key":"secret123"}`)
+	md := metadata.New(map[string]string{"authorization": "Bearer wrong"})
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+	err := auth.ValidateForTenant(ctx, "key", cfg)
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+}
+
+func TestValidateForTenant_UnknownMode(t *testing.T) {
+	err := auth.ValidateForTenant(context.Background(), "fakemode", nil)
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+}
