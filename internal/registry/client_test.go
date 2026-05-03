@@ -78,6 +78,23 @@ func TestPostgresClient_Get_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, registry.ErrTenantNotFound)
 }
 
+func TestPostgresClient_Get_SuspendedTenant(t *testing.T) {
+	db := openTestDB(t)
+	suspended := registry.Tenant{
+		ID: "test-suspended", ProjectID: "susp", DatabaseID: "db",
+		SchemaName: "embyr_db", CredentialType: registry.CredentialGCPSecret,
+		CredentialRef: "projects/x/secrets/y/versions/1", AuthMode: "none",
+		AuthConfig: json.RawMessage(`{}`), Status: registry.TenantStatusSuspended,
+	}
+	seedTenant(t, db, suspended)
+
+	client := registry.NewPostgresClient(db, 60*time.Second)
+	defer client.Close()
+
+	_, err := client.Get(context.Background(), "susp", "db")
+	assert.ErrorIs(t, err, registry.ErrTenantNotFound)
+}
+
 func TestPostgresClient_Get_CachesTTL(t *testing.T) {
 	db := openTestDB(t)
 	want := registry.Tenant{
