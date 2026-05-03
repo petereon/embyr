@@ -12,5 +12,5 @@ type AgentResolver struct {
 }
 
 func (r *AgentResolver) Resolve(_ context.Context) (string, error) {
-	return "", fmt.Errorf("tenancy: agent resolver not yet implemented (agentID=%s)", r.agentID)
+	return "", fmt.Errorf("tenancy: agent resolver not yet implemented (agentID=%q)", r.agentID)
 }

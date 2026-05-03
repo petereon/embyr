@@ -2,7 +2,9 @@ package tenancy
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"strings"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
@@ -15,18 +17,15 @@ type EmbyrSecretResolver struct {
 }
 
 func (r *EmbyrSecretResolver) Resolve(ctx context.Context) (string, error) {
-	sep := -1
-	for i, c := range r.encryptedDSN {
-		if c == '|' {
-			sep = i
-			break
-		}
-	}
+	sep := strings.IndexByte(r.encryptedDSN, '|')
 	if sep < 0 {
 		return "", fmt.Errorf("tenancy: embyr_secret: malformed credential_ref (missing '|')")
 	}
 	keyResource := r.encryptedDSN[:sep]
-	ciphertext := []byte(r.encryptedDSN[sep+1:])
+	ciphertext, err := base64.StdEncoding.DecodeString(r.encryptedDSN[sep+1:])
+	if err != nil {
+		return "", fmt.Errorf("tenancy: embyr_secret: base64 decode ciphertext: %w", err)
+	}
 
 	client, err := kms.NewKeyManagementClient(ctx)
 	if err != nil {
