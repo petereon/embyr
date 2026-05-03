@@ -41,7 +41,7 @@ func NewPostgresClient(db *sql.DB, ttl time.Duration) *PostgresClient {
 }
 
 func cacheKey(projectID, databaseID string) string {
-	return projectID + "/" + databaseID
+	return projectID + "\x00" + databaseID
 }
 
 // Get returns a cached tenant or fetches from the registry DB.
@@ -65,10 +65,13 @@ func (c *PostgresClient) Get(ctx context.Context, projectID, databaseID string) 
 	}
 
 	c.mu.Lock()
-	if notFound {
-		c.cache[key] = &cacheEntry{tenant: nil, expiresAt: time.Now().Add(c.ttl)}
-	} else {
-		c.cache[key] = &cacheEntry{tenant: t, expiresAt: time.Now().Add(c.ttl)}
+	// Guard: only write if still stale (another goroutine may have already populated it)
+	if existing, ok := c.cache[key]; !ok || time.Now().After(existing.expiresAt) {
+		if notFound {
+			c.cache[key] = &cacheEntry{tenant: nil, expiresAt: time.Now().Add(c.ttl)}
+		} else {
+			c.cache[key] = &cacheEntry{tenant: t, expiresAt: time.Now().Add(c.ttl)}
+		}
 	}
 	c.mu.Unlock()
 
@@ -83,7 +86,7 @@ func (c *PostgresClient) fetch(ctx context.Context, projectID, databaseID string
 		SELECT id, project_id, database_id, schema_name, credential_type,
 		       credential_ref, auth_mode, auth_config, status, updated_at
 		FROM tenants
-		WHERE project_id = $1 AND database_id = $2
+		WHERE project_id = $1 AND database_id = $2 AND status = 'active'
 		LIMIT 1`, projectID, databaseID)
 
 	var t Tenant
@@ -99,7 +102,7 @@ func (c *PostgresClient) fetch(ctx context.Context, projectID, databaseID string
 	if err != nil {
 		return nil, fmt.Errorf("registry: fetch tenant: %w", err)
 	}
-	if t.Status == TenantStatusSuspended {
+	if t.Status != TenantStatusActive {
 		return nil, ErrTenantNotFound
 	}
 	t.AuthConfig = json.RawMessage(authConfigBytes)
@@ -108,3 +111,5 @@ func (c *PostgresClient) fetch(ctx context.Context, projectID, databaseID string
 
 // Close is a no-op; the caller owns the *sql.DB lifetime.
 func (c *PostgresClient) Close() {}
+
+var _ Client = (*PostgresClient)(nil)
