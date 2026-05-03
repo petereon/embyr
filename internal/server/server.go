@@ -126,10 +126,10 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 // is routed to the customer's own Postgres DB via AdapterFactory. db is nil;
 // per-tenant adapters are injected into context by the tenancy interceptors.
 func NewMultiTenant(cfg *config.Config, factory *tenancy.AdapterFactory, log *zap.Logger) (*Server, error) {
-	authCfg := &auth.Config{
-		Unary:  tenancy.UnaryInterceptor(factory, log),
-		Stream: tenancy.StreamInterceptor(factory, log),
-	}
+	authCfg := auth.NewFromInterceptors(
+		tenancy.UnaryInterceptor(factory, log),
+		tenancy.StreamInterceptor(factory, log),
+	)
 
 	opts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(loggingUnaryInterceptor(log), authCfg.Unary),

@@ -54,6 +54,13 @@ func (c *Config) Mode() string { return c.mode }
 // RawConfig returns the raw auth config bytes.
 func (c *Config) RawConfig() []byte { return c.rawConfig }
 
+// NewFromInterceptors builds a Config from pre-constructed gRPC interceptors.
+// Used by multi-tenant mode where auth is per-tenant (injected by tenancy
+// middleware) rather than a single global auth config.
+func NewFromInterceptors(unary grpc.UnaryServerInterceptor, stream grpc.StreamServerInterceptor) *Config {
+	return &Config{Unary: unary, Stream: stream}
+}
+
 // New builds auth interceptors from the given configuration.
 // Returns an error if the configuration is invalid (e.g. key mode with no key set).
 func New(cfg *config.Config, _ *zap.Logger) (*Config, error) {
