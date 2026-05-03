@@ -12,6 +12,7 @@ import (
 	"github.com/petereon/embyr/internal/codec"
 	"github.com/petereon/embyr/internal/listen"
 	"github.com/petereon/embyr/internal/store"
+	"github.com/petereon/embyr/internal/tenancy"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -28,6 +29,16 @@ type firestoreServer struct {
 	db       store.StorageAdapter
 	log      *zap.Logger
 	registry *listen.Registry
+}
+
+// adapter returns the StorageAdapter for this request.
+// In multi-tenant mode the tenancy middleware injects a per-tenant adapter.
+// In single-tenant mode it falls back to s.db.
+func (s *firestoreServer) adapter(ctx context.Context) store.StorageAdapter {
+	if a := tenancy.AdapterFromCtx(ctx); a != nil {
+		return a
+	}
+	return s.db
 }
 
 // GetDocument fetches a single document by its resource name.

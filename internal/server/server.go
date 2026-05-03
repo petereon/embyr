@@ -17,6 +17,7 @@ import (
 	"github.com/petereon/embyr/internal/health"
 	"github.com/petereon/embyr/internal/listen"
 	"github.com/petereon/embyr/internal/store"
+	"github.com/petereon/embyr/internal/tenancy"
 	"github.com/petereon/embyr/internal/webchannel"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
@@ -121,6 +122,79 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 	}, nil
 }
 
+// NewMultiTenant creates a Server in multi-tenant mode. Each Firestore request
+// is routed to the customer's own Postgres DB via AdapterFactory. db is nil;
+// per-tenant adapters are injected into context by the tenancy interceptors.
+func NewMultiTenant(cfg *config.Config, factory *tenancy.AdapterFactory, log *zap.Logger) (*Server, error) {
+	authCfg := &auth.Config{
+		Unary:  tenancy.UnaryInterceptor(factory, log),
+		Stream: tenancy.StreamInterceptor(factory, log),
+	}
+
+	opts := []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(loggingUnaryInterceptor(log), authCfg.Unary),
+		grpc.ChainStreamInterceptor(loggingStreamInterceptor(log), authCfg.Stream),
+	}
+
+	grpcSrv := grpc.NewServer(opts...)
+	reg := listen.NewRegistry()
+	fs := &firestoreServer{db: nil, log: log, registry: reg}
+	firestorev1.RegisterFirestoreServer(grpcSrv, fs)
+	reflection.Register(grpcSrv)
+
+	grpcWebSrv := grpcweb.WrapServer(grpcSrv,
+		grpcweb.WithOriginFunc(func(origin string) bool { return true }),
+	)
+
+	gwMux := runtime.NewServeMux()
+	grpcAddr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.GRPCPort)
+	if err := firestorev1.RegisterFirestoreHandlerFromEndpoint(
+		context.Background(), gwMux, grpcAddr,
+		[]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
+	); err != nil {
+		return nil, fmt.Errorf("server: register gateway: %w", err)
+	}
+
+	h := health.New(nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", h.Healthz)
+	mux.HandleFunc("/readyz", h.Readyz)
+
+	wcMgr := webchannel.NewManager()
+	wcHandler := webchannel.NewHandler(wcMgr, fs.Listen)
+	mux.Handle("/google.firestore.v1.Firestore/Listen/channel", wcHandler)
+	wcWriteHandler := webchannel.NewWriteHandler(wcMgr, fs.Write)
+	mux.Handle("/google.firestore.v1.Firestore/Write/channel", wcWriteHandler)
+
+	innerMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":runQuery") {
+			serveRunQuery(w, r, fs)
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":batchGet") {
+			serveBatchGetDocuments(w, r, fs)
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":runAggregationQuery") {
+			serveRunAggregationQuery(w, r, fs)
+			return
+		}
+		gwMux.ServeHTTP(w, r)
+	})
+	mux.Handle("/", tenancy.HTTPMiddleware(factory, log, innerMux))
+
+	return &Server{
+		cfg:        cfg,
+		db:         nil,
+		log:        log,
+		grpcServer: grpcSrv,
+		restMux:    mux,
+		grpcWebSrv: grpcWebSrv,
+		fs:         fs,
+		wcMgr:      wcMgr,
+	}, nil
+}
+
 // Run starts both the gRPC and REST listeners. Blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	grpcLis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.cfg.Server.GRPCPort))
@@ -179,6 +253,9 @@ func (s *Server) Run(ctx context.Context) error {
 	eg, egCtx := errgroup.WithContext(ctx)
 	// Feed registry from adapter subscription; tied to egCtx so it stops on shutdown.
 	eg.Go(func() error {
+		if s.db == nil {
+			return nil
+		}
 		ch, cancel := s.db.Subscribe(egCtx)
 		defer cancel()
 		for c := range ch {
@@ -199,6 +276,9 @@ func (s *Server) Run(ctx context.Context) error {
 		sweepInterval = 30 * time.Second
 	}
 	eg.Go(func() error {
+		if s.db == nil {
+			return nil
+		}
 		ticker := time.NewTicker(sweepInterval)
 		defer ticker.Stop()
 		for {

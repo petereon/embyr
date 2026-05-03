@@ -30,6 +30,11 @@ func (h *Handler) Healthz(w http.ResponseWriter, _ *http.Request) {
 
 // Readyz returns 200 OK when the database is reachable, 503 otherwise.
 func (h *Handler) Readyz(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := h.db.Ping(ctx); err != nil {
