@@ -94,6 +94,8 @@ func (s *peekStream) RecvMsg(m interface{}) error {
 	return nil
 }
 
+func (s *peekStream) Context() context.Context { return s.ServerStream.Context() }
+
 type contextStream struct {
 	grpc.ServerStream
 	ctx context.Context
