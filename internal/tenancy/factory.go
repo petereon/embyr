@@ -96,6 +96,7 @@ func (f *AdapterFactory) Get(ctx context.Context, projectID, databaseID string) 
 		return nil, nil, fmt.Errorf("tenancy: append search_path: %w", err)
 	}
 
+	// migrationsPath is empty: the factory does not own schema migrations.
 	adapter, err := postgres.New(dsn, "", 5)
 	if err != nil {
 		return nil, nil, fmt.Errorf("tenancy: open postgres for %s/%s: %w", projectID, databaseID, err)
@@ -113,6 +114,11 @@ func (f *AdapterFactory) Get(ctx context.Context, projectID, databaseID string) 
 
 	e := &entry{adapter: adapter, authConfig: authCfg}
 	f.mu.Lock()
+	if existing, ok := f.cache.Get(key); ok {
+		f.mu.Unlock()
+		adapter.Close() //nolint:errcheck
+		return existing.adapter, existing.authConfig, nil
+	}
 	f.cache.Add(key, e)
 	f.mu.Unlock()
 
