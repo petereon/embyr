@@ -44,7 +44,7 @@ jobs:
         working-directory: test/integration
 
       - name: run vitest
-        run: bun test
+        run: bun run test
         working-directory: test/integration
 
   browser:
