@@ -40,7 +40,7 @@ var (
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 
-	// 1. Start ministack
+	// 1. Start ministack (AWS SM + RDS)
 	ministackCtr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "ministackorg/ministack",
@@ -69,7 +69,7 @@ func TestMain(m *testing.M) {
 	// 2. Start GCP Secret Manager emulator
 	gcpCtr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "ghcr.io/blackwell-systems/gcp-secret-manager-emulator:dual",
+			Image:        "ghcr.io/blackwell-systems/gcp-secret-manager-emulator:latest",
 			ExposedPorts: []string{"9090/tcp"},
 			WaitingFor:   wait.ForListeningPort("9090/tcp"),
 		},
@@ -170,6 +170,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("dial gcp emulator: %v", err)
 	}
+
 	gcpSeedClient, err := secretmanager.NewClient(ctx, option.WithGRPCConn(gcpConn))
 	if err != nil {
 		log.Fatalf("gcp seed client: %v", err)
