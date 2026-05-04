@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: Test
+    name: Go Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,3 +25,74 @@ jobs:
 
       - name: integration tests
         run: go test ./test/multitenant/... -v -count=1 -timeout 180s
+
+  js-integration:
+    name: JS Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: install deps
+        run: bun install
+        working-directory: test/integration
+
+      - name: run vitest
+        run: bun test
+        working-directory: test/integration
+
+  browser:
+    name: Browser Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: build embyr
+        run: go build -o embyr-bin ./cmd/embyr
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: install demo-react deps
+        run: bun install
+        working-directory: demo-react
+
+      - name: install browser test deps
+        run: bun install
+        working-directory: test/browser
+
+      - name: install chromium
+        run: bunx playwright install chromium --with-deps
+        working-directory: test/browser
+
+      - name: start embyr
+        run: ./embyr-bin &
+        env:
+          EMBYR_SERVER_REST_PORT: "17081"
+          EMBYR_SERVER_GRPC_PORT: "17082"
+          EMBYR_BACKEND_TYPE: sqlite
+          EMBYR_BACKEND_SQLITE_PATH: /tmp/embyr-browser-test.db
+          EMBYR_AUTH_MODE: none
+          EMBYR_LOG_FORMAT: text
+
+      - name: wait for embyr
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:17081/healthz && exit 0
+            sleep 1
+          done
+          echo "embyr did not become ready" && exit 1
+
+      - name: run playwright
+        run: bunx playwright test
+        working-directory: test/browser
