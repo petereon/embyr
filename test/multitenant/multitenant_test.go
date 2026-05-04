@@ -49,6 +49,9 @@ func TestAWSTenant_CRUD(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, created)
+	t.Cleanup(func() {
+		fs.DeleteDocument(context.Background(), &firestorev1.DeleteDocumentRequest{Name: created.Name}) //nolint:errcheck
+	})
 
 	got, err := fs.GetDocument(ctx, &firestorev1.GetDocumentRequest{Name: created.Name})
 	require.NoError(t, err)
@@ -82,6 +85,9 @@ func TestGCPTenant_CRUD(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, created)
+	t.Cleanup(func() {
+		fs.DeleteDocument(context.Background(), &firestorev1.DeleteDocumentRequest{Name: created.Name}) //nolint:errcheck
+	})
 
 	got, err := fs.GetDocument(ctx, &firestorev1.GetDocumentRequest{Name: created.Name})
 	require.NoError(t, err)
@@ -112,6 +118,11 @@ func TestTenantIsolation(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if _, err := fs.DeleteDocument(context.Background(), &firestorev1.DeleteDocumentRequest{Name: awsDoc.Name}); err != nil {
+			t.Logf("cleanup: delete %s: %v", awsDoc.Name, err)
+		}
+	})
 
 	gcpDoc, err := fs.CreateDocument(ctx, &firestorev1.CreateDocumentRequest{
 		Parent:       gcpParent,
@@ -122,6 +133,11 @@ func TestTenantIsolation(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if _, err := fs.DeleteDocument(context.Background(), &firestorev1.DeleteDocumentRequest{Name: gcpDoc.Name}); err != nil {
+			t.Logf("cleanup: delete %s: %v", gcpDoc.Name, err)
+		}
+	})
 
 	awsList, err := fs.ListDocuments(ctx, &firestorev1.ListDocumentsRequest{
 		Parent:       awsParent,
@@ -129,6 +145,7 @@ func TestTenantIsolation(t *testing.T) {
 	})
 	require.NoError(t, err)
 	awsNames := docNames(awsList.Documents)
+	assert.Len(t, awsNames, 1, "aws shared-col should contain exactly one document")
 	assert.Contains(t, awsNames, awsDoc.Name)
 	assert.NotContains(t, awsNames, gcpDoc.Name)
 
@@ -138,11 +155,9 @@ func TestTenantIsolation(t *testing.T) {
 	})
 	require.NoError(t, err)
 	gcpNames := docNames(gcpList.Documents)
+	assert.Len(t, gcpNames, 1, "gcp shared-col should contain exactly one document")
 	assert.Contains(t, gcpNames, gcpDoc.Name)
 	assert.NotContains(t, gcpNames, awsDoc.Name)
-
-	fs.DeleteDocument(ctx, &firestorev1.DeleteDocumentRequest{Name: awsDoc.Name}) //nolint:errcheck
-	fs.DeleteDocument(ctx, &firestorev1.DeleteDocumentRequest{Name: gcpDoc.Name}) //nolint:errcheck
 }
 
 func TestUnknownTenant_Unauthenticated(t *testing.T) {
