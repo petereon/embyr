@@ -15,7 +15,7 @@ import (
 // BeginTransaction creates a new server-side transaction and returns its ID.
 func (s *firestoreServer) BeginTransaction(ctx context.Context, req *firestorev1.BeginTransactionRequest) (*firestorev1.BeginTransactionResponse, error) {
 	readOnly := req.GetOptions().GetReadOnly() != nil
-	txID, err := s.db.BeginTransaction(ctx, readOnly)
+	txID, err := s.adapter(ctx).BeginTransaction(ctx, readOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +30,7 @@ func (s *firestoreServer) Rollback(ctx context.Context, req *firestorev1.Rollbac
 	if txID == "" {
 		return nil, status.Error(codes.InvalidArgument, "transaction is required")
 	}
-	if err := s.db.RollbackTransaction(ctx, txID); err != nil {
+	if err := s.adapter(ctx).RollbackTransaction(ctx, txID); err != nil {
 		return nil, err
 	}
 	return &emptypb.Empty{}, nil
@@ -52,7 +52,7 @@ func (s *firestoreServer) BatchWrite(ctx context.Context, req *firestorev1.Batch
 		// Apply each write in its own transaction so a failure doesn't roll
 		// back its siblings.
 		var perWriteResults []*firestorev1.WriteResult
-		err := s.db.WithTransaction(ctx, func(txCtx context.Context) error {
+		err := s.adapter(ctx).WithTransaction(ctx, func(txCtx context.Context) error {
 			rs, batchErr := s.applyWriteBatch(txCtx, []*firestorev1.Write{w}, now)
 			perWriteResults = rs
 			return batchErr

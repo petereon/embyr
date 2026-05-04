@@ -24,7 +24,7 @@ func (s *firestoreServer) RunAggregationQuery(req *firestorev1.RunAggregationQue
 		return err
 	}
 
-	results, err := s.db.RunAggregationQuery(ctx, q)
+	results, err := s.adapter(ctx).RunAggregationQuery(ctx, q)
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func (s *firestoreServer) ListCollectionIds(ctx context.Context, req *firestorev
 		return nil, status.Error(codes.InvalidArgument, "parent is required")
 	}
 
-	ids, nextToken, err := s.db.ListCollectionIds(ctx, parent, req.GetPageSize(), req.GetPageToken())
+	ids, nextToken, err := s.adapter(ctx).ListCollectionIds(ctx, parent, req.GetPageSize(), req.GetPageToken())
 	if err != nil {
 		return nil, err
 	}

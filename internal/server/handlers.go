@@ -46,7 +46,7 @@ func (s *firestoreServer) GetDocument(ctx context.Context, req *firestorev1.GetD
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
-	d, err := s.db.GetDocument(ctx, req.GetName())
+	d, err := s.adapter(ctx).GetDocument(ctx, req.GetName())
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func (s *firestoreServer) CreateDocument(ctx context.Context, req *firestorev1.C
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "encode document: %v", err)
 	}
-	created, err := s.db.CreateDocument(ctx, sd)
+	created, err := s.adapter(ctx).CreateDocument(ctx, sd)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +123,7 @@ func (s *firestoreServer) UpdateDocument(ctx context.Context, req *firestorev1.U
 	// Apply field mask (read-modify-write) if set.
 	fields := doc.GetFields()
 	if mask := req.GetUpdateMask(); mask != nil && len(mask.GetFieldPaths()) > 0 {
-		curr, err := s.db.GetDocument(ctx, doc.GetName())
+		curr, err := s.adapter(ctx).GetDocument(ctx, doc.GetName())
 		if err != nil {
 			if status.Code(err) == codes.NotFound &&
 				(writeMode == store.WriteModeUpsert || writeMode == store.WriteModeInsertOnly) {
@@ -156,7 +156,7 @@ func (s *firestoreServer) UpdateDocument(ctx context.Context, req *firestorev1.U
 		return nil, status.Errorf(codes.Internal, "encode document: %v", err)
 	}
 
-	result, err := s.db.UpdateDocument(ctx, sd, writeMode)
+	result, err := s.adapter(ctx).UpdateDocument(ctx, sd, writeMode)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func (s *firestoreServer) DeleteDocument(ctx context.Context, req *firestorev1.D
 			mustExist = true
 		}
 	}
-	if err := s.db.DeleteDocument(ctx, req.GetName(), mustExist); err != nil {
+	if err := s.adapter(ctx).DeleteDocument(ctx, req.GetName(), mustExist); err != nil {
 		return nil, err
 	}
 	return &emptypb.Empty{}, nil
@@ -188,7 +188,7 @@ func (s *firestoreServer) ListDocuments(ctx context.Context, req *firestorev1.Li
 	if req.GetParent() == "" {
 		return nil, status.Error(codes.InvalidArgument, "parent is required")
 	}
-	page, err := s.db.ListDocuments(ctx,
+	page, err := s.adapter(ctx).ListDocuments(ctx,
 		req.GetParent(), req.GetCollectionId(),
 		req.GetPageSize(), req.GetPageToken())
 	if err != nil {
@@ -245,7 +245,7 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 				return nil, status.Error(codes.Unimplemented, "write operation type not supported in transaction commit")
 			}
 		}
-		result, err := s.db.CommitTransaction(ctx, txID, ops)
+		result, err := s.adapter(ctx).CommitTransaction(ctx, txID, ops)
 		if err != nil {
 			return nil, err
 		}
@@ -269,7 +269,7 @@ func (s *firestoreServer) Commit(ctx context.Context, req *firestorev1.CommitReq
 	}
 
 	var results []*firestorev1.WriteResult
-	if err := s.db.WithTransaction(ctx, func(txCtx context.Context) error {
+	if err := s.adapter(ctx).WithTransaction(ctx, func(txCtx context.Context) error {
 		var batchErr error
 		results, batchErr = s.applyWriteBatch(txCtx, req.GetWrites(), now)
 		return batchErr
@@ -324,7 +324,7 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 			needsRead := hasMask || preconditionUpdateTime != nil || len(transforms) > 0
 			var currFields map[string]*firestorev1.Value
 			if needsRead {
-				curr, err := s.db.GetDocument(ctx, doc.GetName())
+				curr, err := s.adapter(ctx).GetDocument(ctx, doc.GetName())
 				if err == nil {
 					currDoc, _ := codec.StoreToProto(curr)
 					currFields = currDoc.GetFields()
@@ -374,7 +374,7 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 			if err != nil {
 				return nil, status.Errorf(codes.Internal, "encode document: %v", err)
 			}
-			result, err := s.db.UpdateDocument(ctx, sd, mode)
+			result, err := s.adapter(ctx).UpdateDocument(ctx, sd, mode)
 			if err != nil {
 				return nil, err
 			}
@@ -396,7 +396,7 @@ func (s *firestoreServer) applyWriteBatch(ctx context.Context, writes []*firesto
 					mustExist = true
 				}
 			}
-			if err := s.db.DeleteDocument(ctx, op.Delete, mustExist); err != nil {
+			if err := s.adapter(ctx).DeleteDocument(ctx, op.Delete, mustExist); err != nil {
 				return nil, err
 			}
 			results = append(results, &firestorev1.WriteResult{
@@ -464,7 +464,7 @@ func (s *firestoreServer) Write(stream firestorev1.Firestore_WriteServer) error 
 		s.log.Info("Write stream: applying batch", zap.Int("writes", len(req.GetWrites())))
 		now = time.Now().UTC()
 		var results []*firestorev1.WriteResult
-		if err := s.db.WithTransaction(stream.Context(), func(txCtx context.Context) error {
+		if err := s.adapter(stream.Context()).WithTransaction(stream.Context(), func(txCtx context.Context) error {
 			var batchErr error
 			results, batchErr = s.applyWriteBatch(txCtx, req.GetWrites(), now)
 			return batchErr
@@ -506,7 +506,7 @@ func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRe
 			_, readOnly = ro.(*firestorev1.TransactionOptions_ReadOnly_)
 		}
 		var err error
-		txID, err = s.db.BeginTransaction(ctx, readOnly)
+		txID, err = s.adapter(ctx).BeginTransaction(ctx, readOnly)
 		if err != nil {
 			return err
 		}
@@ -514,7 +514,7 @@ func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRe
 		// Roll back if this handler fails; cleared on success so client can Commit/Rollback.
 		defer func() {
 			if ownedTx {
-				_ = s.db.RollbackTransaction(ctx, txID)
+				_ = s.adapter(ctx).RollbackTransaction(ctx, txID)
 			}
 		}()
 		// First response carries the new transaction ID so the client can later Commit/Rollback.
@@ -533,9 +533,9 @@ func (s *firestoreServer) BatchGetDocuments(req *firestorev1.BatchGetDocumentsRe
 		var sd *store.Document
 		var err error
 		if txID != "" {
-			sd, err = s.db.GetDocumentForTransaction(ctx, txID, path)
+			sd, err = s.adapter(ctx).GetDocumentForTransaction(ctx, txID, path)
 		} else {
-			sd, err = s.db.GetDocument(ctx, path)
+			sd, err = s.adapter(ctx).GetDocument(ctx, path)
 		}
 
 		if err != nil {
@@ -663,7 +663,7 @@ func (s *firestoreServer) RunQuery(req *firestorev1.RunQueryRequest, stream fire
 	pageToken := ""
 	for {
 		q.PageToken = pageToken
-		page, err := s.db.QueryDocuments(ctx, q)
+		page, err := s.adapter(ctx).QueryDocuments(ctx, q)
 		if err != nil {
 			return err
 		}
