@@ -26,6 +26,7 @@ func (r *GCPSecretResolver) Resolve(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("tenancy: gcp emulator dial %q: %w", host, err)
 		}
+		defer conn.Close()
 		opts = append(opts, option.WithGRPCConn(conn))
 	}
 
@@ -39,6 +40,9 @@ func (r *GCPSecretResolver) Resolve(ctx context.Context) (string, error) {
 		&secretmanagerpb.AccessSecretVersionRequest{Name: r.resourceName})
 	if err != nil {
 		return "", fmt.Errorf("tenancy: access gcp secret %q: %w", r.resourceName, err)
+	}
+	if resp.Payload == nil || len(resp.Payload.Data) == 0 {
+		return "", fmt.Errorf("tenancy: gcp secret %q returned empty payload", r.resourceName)
 	}
 	return string(resp.Payload.Data), nil
 }
