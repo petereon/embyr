@@ -142,20 +142,15 @@ func TestMain(m *testing.M) {
 	}
 
 	// 7. Run Embyr migrations on both tenant schemas.
-	// A fresh *sql.DB per schema ensures golang-migrate gets a clean connection
-	// with the correct search_path; reusing a pool causes the second migration
-	// to inherit the first schema's search_path and fail with "trigger already exists".
+	tenantDB, err := sql.Open("pgx", tenantDSN)
+	if err != nil {
+		log.Fatalf("open tenant db: %v", err)
+	}
 	runner := migrations.NewRunner("../../migrations/postgres")
 	for _, schema := range []string{"embyr_aws_test", "embyr_gcp_test"} {
-		schemaDB, err := sql.Open("pgx", tenantDSN)
-		if err != nil {
-			log.Fatalf("open tenant db for schema %q: %v", schema, err)
-		}
-		if err := runner.Up(ctx, schemaDB, schema); err != nil {
-			schemaDB.Close()
+		if err := runner.Up(ctx, tenantDB, schema); err != nil {
 			log.Fatalf("migrate schema %q: %v", schema, err)
 		}
-		schemaDB.Close()
 	}
 
 	// 8. Seed AWS secret
@@ -256,6 +251,7 @@ func TestMain(m *testing.M) {
 	gcpSeedClient.Close()
 	gcpConn.Close()
 	regDB.Close()
+	tenantDB.Close()
 	gcpCtr.Terminate(ctx)       //nolint:errcheck
 	ministackCtr.Terminate(ctx) //nolint:errcheck
 	os.Exit(code)

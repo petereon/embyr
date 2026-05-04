@@ -59,11 +59,24 @@ func (r *Runner) Down(ctx context.Context, db *sql.DB, schemaName string) error 
 }
 
 func (r *Runner) newMigrate(db *sql.DB, schemaName string) (*migrate.Migrate, error) {
-	driver, err := migratepostgres.WithInstance(db, &migratepostgres.Config{
+	ctx := context.Background()
+	// Acquire a dedicated connection and pin search_path so migration SQL
+	// (unqualified table/function names) resolves against the target schema,
+	// not public. WithConnection owns the conn for the migration lifetime.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("migrations: acquire conn for %q: %w", schemaName, err)
+	}
+	if _, err := conn.ExecContext(ctx, `SET search_path = "`+schemaName+`"`); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("migrations: set search_path for %q: %w", schemaName, err)
+	}
+	driver, err := migratepostgres.WithConnection(ctx, conn, &migratepostgres.Config{
 		SchemaName:      schemaName,
 		MigrationsTable: "schema_migrations",
 	})
 	if err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("migrations: driver for %q: %w", schemaName, err)
 	}
 	m, err := migrate.NewWithDatabaseInstance(
