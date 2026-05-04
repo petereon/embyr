@@ -268,7 +268,7 @@ func waitForRDS(ctx context.Context, client *rds.Client, instanceID, dbName stri
 		if err == nil && len(desc.DBInstances) > 0 {
 			inst := desc.DBInstances[0]
 			if aws.ToString(inst.DBInstanceStatus) == "available" && inst.Endpoint != nil {
-				addr = fmt.Sprintf("%s:%d", aws.ToString(inst.Endpoint.Address), inst.Endpoint.Port)
+				addr = fmt.Sprintf("%s:%d", aws.ToString(inst.Endpoint.Address), aws.ToInt32(inst.Endpoint.Port))
 				break
 			}
 		}
