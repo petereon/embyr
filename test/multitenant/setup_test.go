@@ -57,7 +57,6 @@ func TestMain(m *testing.M) {
 		log.Printf("ministack unavailable (Docker not running?): %v — skipping integration tests", err)
 		os.Exit(m.Run())
 	}
-	defer ministackCtr.Terminate(ctx) //nolint:errcheck
 
 	ministackPort, _ := ministackCtr.MappedPort(ctx, "4566/tcp")
 	ministackURL := "http://localhost:" + ministackPort.Port()
@@ -78,9 +77,9 @@ func TestMain(m *testing.M) {
 	})
 	if err != nil {
 		log.Printf("gcp emulator unavailable: %v — skipping integration tests", err)
+		ministackCtr.Terminate(ctx) //nolint:errcheck
 		os.Exit(m.Run())
 	}
-	defer gcpCtr.Terminate(ctx) //nolint:errcheck
 
 	gcpPort, _ := gcpCtr.MappedPort(ctx, "9090/tcp")
 	gcpAddr := "localhost:" + gcpPort.Port()
@@ -122,7 +121,6 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("open registry db: %v", err)
 	}
-	defer regDB.Close()
 
 	_, err = regDB.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS tenants (
@@ -148,7 +146,6 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("open tenant db: %v", err)
 	}
-	defer tenantDB.Close()
 
 	runner := migrations.NewRunner("../../migrations/postgres")
 	for _, schema := range []string{"embyr_aws_test", "embyr_gcp_test"} {
@@ -173,13 +170,10 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("dial gcp emulator: %v", err)
 	}
-	defer gcpConn.Close()
-
 	gcpSeedClient, err := secretmanager.NewClient(ctx, option.WithGRPCConn(gcpConn))
 	if err != nil {
 		log.Fatalf("gcp seed client: %v", err)
 	}
-	defer gcpSeedClient.Close()
 
 	gcpSecret, err := gcpSeedClient.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
 		Parent:   "projects/embyr-test",
@@ -232,10 +226,7 @@ func TestMain(m *testing.M) {
 	}
 
 	regClient := registry.NewPostgresClient(regDB, 60*time.Second)
-	defer regClient.Close()
-
 	factory := tenancy.NewAdapterFactory(regClient, 10).WithLogger(zap.NewNop())
-	defer factory.Close()
 
 	srv, err := server.NewMultiTenant(cfg, factory, zap.NewNop())
 	if err != nil {
@@ -252,9 +243,17 @@ func TestMain(m *testing.M) {
 
 	testGRPCAddr = fmt.Sprintf("127.0.0.1:%d", grpcPort)
 
-	// 12. Run tests, then teardown
+	// 12. Run tests, then explicit teardown (defer is skipped by os.Exit).
 	code := m.Run()
 	cancel()
+	factory.Close()
+	regClient.Close()
+	gcpSeedClient.Close()
+	gcpConn.Close()
+	regDB.Close()
+	tenantDB.Close()
+	gcpCtr.Terminate(ctx)       //nolint:errcheck
+	ministackCtr.Terminate(ctx) //nolint:errcheck
 	os.Exit(code)
 }
 
