@@ -463,8 +463,9 @@ func (s *firestoreServer) Write(stream firestorev1.Firestore_WriteServer) error 
 
 		s.log.Info("Write stream: applying batch", zap.Int("writes", len(req.GetWrites())))
 		now = time.Now().UTC()
+		ctx := stream.Context()
 		var results []*firestorev1.WriteResult
-		if err := s.adapter(stream.Context()).WithTransaction(stream.Context(), func(txCtx context.Context) error {
+		if err := s.adapter(ctx).WithTransaction(ctx, func(txCtx context.Context) error {
 			var batchErr error
 			results, batchErr = s.applyWriteBatch(txCtx, req.GetWrites(), now)
 			return batchErr
