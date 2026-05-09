@@ -12,9 +12,16 @@ import (
 	"time"
 
 	firestorev1 "github.com/petereon/embyr/gen/go/google/firestore/v1"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 )
+
+// TenantResolveFn resolves and authenticates a tenant from a Firestore resource path.
+// Returning a non-nil error aborts session establishment with the appropriate HTTP status.
+// Set to nil in single-tenant mode (no-op).
+type TenantResolveFn func(ctx context.Context, path string) (context.Context, error)
 
 // listenBridge is a fake Firestore_ListenServer that routes between HTTP and the gRPC handler.
 type listenBridge struct {
@@ -60,13 +67,14 @@ func (b *listenBridge) Recv() (*firestorev1.ListenRequest, error) {
 
 // Handler handles both POST (forward channel) and GET (back channel) for BrowserChannel.
 type Handler struct {
-	mgr      *Manager
-	listenFn func(firestorev1.Firestore_ListenServer) error
+	mgr       *Manager
+	listenFn  func(firestorev1.Firestore_ListenServer) error
+	resolveFn TenantResolveFn // nil in single-tenant mode
 }
 
-// NewHandler creates a BrowserChannel Handler.
-func NewHandler(mgr *Manager, listenFn func(firestorev1.Firestore_ListenServer) error) *Handler {
-	return &Handler{mgr: mgr, listenFn: listenFn}
+// NewHandler creates a BrowserChannel Handler. Pass resolveFn=nil in single-tenant mode.
+func NewHandler(mgr *Manager, listenFn func(firestorev1.Firestore_ListenServer) error, resolveFn TenantResolveFn) *Handler {
+	return &Handler{mgr: mgr, listenFn: listenFn, resolveFn: resolveFn}
 }
 
 // ServeHTTP dispatches to the POST (forward) or GET (back) channel handler.
@@ -88,13 +96,36 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 	rid := q.Get("RID")
 
 	if sid == "" && rid != "" {
-		// New session establishment.
-		sess := h.mgr.NewSession()
-
+		// Parse body first so we can extract the database path for tenant resolution.
 		reqs, _ := parseForwardBody(r)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		bridge := newListenBridge(ctx)
+		ctx := r.Context()
+		if h.resolveFn != nil {
+			var database string
+			if len(reqs) > 0 {
+				database = reqs[0].GetDatabase()
+			}
+			// Inject HTTP Authorization header as gRPC incoming metadata so
+			// auth.ValidateForTenant → bearerToken(ctx) works correctly.
+			if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+				md := metadata.New(map[string]string{"authorization": authHeader})
+				ctx = metadata.NewIncomingContext(ctx, md)
+			}
+			var err error
+			ctx, err = h.resolveFn(ctx, database)
+			if err != nil {
+				c := status.Code(err)
+				http.Error(w, status.Convert(err).Message(), wcGRPCToHTTP(c))
+				return
+			}
+		}
+
+		sess := h.mgr.NewSession()
+		// Detach from the HTTP request's cancellation: the bridge must outlive
+		// this POST handler, but must carry the authenticated values (adapter,
+		// tenant key, etc.) from ctx.
+		sessCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		bridge := newListenBridge(sessCtx)
 
 		sess.bridge = bridge
 		sess.cancel = cancel
@@ -297,13 +328,14 @@ func (b *writeBridge) Recv() (*firestorev1.WriteRequest, error) {
 
 // WriteHandler handles the Write BrowserChannel (POST forward + GET back).
 type WriteHandler struct {
-	mgr     *Manager
-	writeFn func(firestorev1.Firestore_WriteServer) error
+	mgr       *Manager
+	writeFn   func(firestorev1.Firestore_WriteServer) error
+	resolveFn TenantResolveFn
 }
 
-// NewWriteHandler creates a WriteHandler.
-func NewWriteHandler(mgr *Manager, writeFn func(firestorev1.Firestore_WriteServer) error) *WriteHandler {
-	return &WriteHandler{mgr: mgr, writeFn: writeFn}
+// NewWriteHandler creates a WriteHandler. Pass resolveFn=nil in single-tenant mode.
+func NewWriteHandler(mgr *Manager, writeFn func(firestorev1.Firestore_WriteServer) error, resolveFn TenantResolveFn) *WriteHandler {
+	return &WriteHandler{mgr: mgr, writeFn: writeFn, resolveFn: resolveFn}
 }
 
 func (h *WriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -323,10 +355,36 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 	rid := q.Get("RID")
 
 	if sid == "" && rid != "" {
-		sess := h.mgr.NewSession()
+		// Parse body first so we can extract the database path for tenant resolution.
 		reqs, _ := parseWriteForwardBody(r)
-		ctx, cancel := context.WithCancel(context.Background())
-		bridge := newWriteBridge(ctx)
+
+		ctx := r.Context()
+		if h.resolveFn != nil {
+			var database string
+			if len(reqs) > 0 {
+				database = reqs[0].GetDatabase()
+			}
+			// Inject HTTP Authorization header as gRPC incoming metadata so
+			// auth.ValidateForTenant → bearerToken(ctx) works correctly.
+			if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+				md := metadata.New(map[string]string{"authorization": authHeader})
+				ctx = metadata.NewIncomingContext(ctx, md)
+			}
+			var err error
+			ctx, err = h.resolveFn(ctx, database)
+			if err != nil {
+				c := status.Code(err)
+				http.Error(w, status.Convert(err).Message(), wcGRPCToHTTP(c))
+				return
+			}
+		}
+
+		sess := h.mgr.NewSession()
+		// Detach from the HTTP request's cancellation: the bridge must outlive
+		// this POST handler, but must carry the authenticated values (adapter,
+		// tenant key, etc.) from ctx.
+		sessCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		bridge := newWriteBridge(sessCtx)
 
 		sess.writeBridge = bridge
 		sess.cancel = cancel
@@ -451,6 +509,17 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(sess.FormatNoopChunk(sess.NextNoopSeq()))
 			flusher.Flush()
 		}
+	}
+}
+
+func wcGRPCToHTTP(c codes.Code) int {
+	switch c {
+	case codes.Unauthenticated:
+		return http.StatusUnauthorized
+	case codes.PermissionDenied:
+		return http.StatusForbidden
+	default:
+		return http.StatusInternalServerError
 	}
 }
 

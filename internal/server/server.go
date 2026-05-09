@@ -85,9 +85,9 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 	mux.HandleFunc("/readyz", h.Readyz)
 
 	wcMgr := webchannel.NewManager()
-	wcHandler := webchannel.NewHandler(wcMgr, fs.Listen)
+	wcHandler := webchannel.NewHandler(wcMgr, fs.Listen, nil)
 	mux.Handle("/google.firestore.v1.Firestore/Listen/channel", wcHandler)
-	wcWriteHandler := webchannel.NewWriteHandler(wcMgr, fs.Write)
+	wcWriteHandler := webchannel.NewWriteHandler(wcMgr, fs.Write, nil)
 	mux.Handle("/google.firestore.v1.Firestore/Write/channel", wcWriteHandler)
 
 	// Intercept :runQuery before grpc-gateway. The Firebase lite SDK calls
@@ -125,7 +125,7 @@ func New(cfg *config.Config, db store.StorageAdapter, log *zap.Logger) (*Server,
 // NewMultiTenant creates a Server in multi-tenant mode. Each Firestore request
 // is routed to the customer's own Postgres DB via AdapterFactory. db is nil;
 // per-tenant adapters are injected into context by the tenancy interceptors.
-func NewMultiTenant(cfg *config.Config, factory *tenancy.AdapterFactory, log *zap.Logger) (*Server, error) {
+func NewMultiTenant(cfg *config.Config, factory tenancy.FactoryLike, log *zap.Logger) (*Server, error) {
 	authCfg := auth.NewFromInterceptors(
 		tenancy.UnaryInterceptor(factory, log),
 		tenancy.StreamInterceptor(factory, log),
@@ -161,9 +161,10 @@ func NewMultiTenant(cfg *config.Config, factory *tenancy.AdapterFactory, log *za
 	mux.HandleFunc("/readyz", h.Readyz)
 
 	wcMgr := webchannel.NewManager()
-	wcHandler := webchannel.NewHandler(wcMgr, fs.Listen)
+	resolver := tenancy.NewResolveFn(factory, log)
+	wcHandler := webchannel.NewHandler(wcMgr, fs.Listen, resolver)
 	mux.Handle("/google.firestore.v1.Firestore/Listen/channel", wcHandler)
-	wcWriteHandler := webchannel.NewWriteHandler(wcMgr, fs.Write)
+	wcWriteHandler := webchannel.NewWriteHandler(wcMgr, fs.Write, resolver)
 	mux.Handle("/google.firestore.v1.Firestore/Write/channel", wcWriteHandler)
 
 	innerMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
