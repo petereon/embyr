@@ -31,7 +31,7 @@ func TestWebChannel_ForwardPostResponse_IsChunkFramed3ElementArray(t *testing.T)
 		<-s.Context().Done()
 		return nil
 	}
-	srv := httptest.NewServer(webchannel.NewHandler(mgr, listenFn))
+	srv := httptest.NewServer(webchannel.NewHandler(mgr, listenFn, nil))
 	t.Cleanup(srv.Close)
 
 	// 1) Establish a session via new-session POST.

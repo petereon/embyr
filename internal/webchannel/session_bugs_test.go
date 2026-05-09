@@ -33,8 +33,8 @@ func TestWebChannel_CrossHandler_GET_DoesNotPanic(t *testing.T) {
 		<-stream.Context().Done()
 		return nil
 	}
-	listenH := webchannel.NewHandler(mgr, listenFn)
-	writeH := webchannel.NewWriteHandler(mgr, writeFn)
+	listenH := webchannel.NewHandler(mgr, listenFn, nil)
+	writeH := webchannel.NewWriteHandler(mgr, writeFn, nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -86,8 +86,8 @@ func TestWebChannel_CrossHandler_WriteGet_OnListenSession_DoesNotPanic(t *testin
 	mgr := webchannel.NewManager()
 	listenFn := func(s firestorev1.Firestore_ListenServer) error { <-s.Context().Done(); return nil }
 	writeFn := func(s firestorev1.Firestore_WriteServer) error { <-s.Context().Done(); return nil }
-	listenH := webchannel.NewHandler(mgr, listenFn)
-	writeH := webchannel.NewWriteHandler(mgr, writeFn)
+	listenH := webchannel.NewHandler(mgr, listenFn, nil)
+	writeH := webchannel.NewWriteHandler(mgr, writeFn, nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -135,7 +135,7 @@ func TestWebChannel_Manager_Shutdown_CancelsActiveSessions(t *testing.T) {
 		listenReturned.Store(true)
 		return nil
 	}
-	listenH := webchannel.NewHandler(mgr, listenFn)
+	listenH := webchannel.NewHandler(mgr, listenFn, nil)
 	srv := httptest.NewServer(listenH)
 	t.Cleanup(srv.Close)
 
