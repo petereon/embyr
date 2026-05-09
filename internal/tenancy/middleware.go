@@ -156,8 +156,8 @@ func resolveTenant(ctx context.Context, factory FactoryLike, log *zap.Logger, pa
 		return ctx, status.Error(codes.Internal, "internal error")
 	}
 
-	ctx = WithAdapter(ctx, adapter)
-	ctx = WithAuthInfo(ctx, AuthInfo{
+	resolvedCtx := WithAdapter(ctx, adapter)
+	resolvedCtx = WithAuthInfo(resolvedCtx, AuthInfo{
 		Mode:   authCfg.Mode(),
 		Config: rawAuthCfg,
 	})
@@ -165,10 +165,10 @@ func resolveTenant(ctx context.Context, factory FactoryLike, log *zap.Logger, pa
 	// Validate the caller's token against this tenant's stored auth config.
 	// For gRPC requests, bearerToken reads from gRPC incoming metadata.
 	// For HTTP requests, HTTPMiddleware injected the Authorization header above.
-	if err := auth.ValidateForTenant(ctx, authCfg.Mode(), rawAuthCfg); err != nil {
-		return ctx, err
+	if err := auth.ValidateForTenant(resolvedCtx, authCfg.Mode(), rawAuthCfg); err != nil {
+		return ctx, err // return original ctx — don't expose adapter in error path
 	}
-	return ctx, nil
+	return resolvedCtx, nil
 }
 
 func grpcCodeToHTTPStatus(c codes.Code) int {
