@@ -105,6 +105,7 @@ func (h *Handler) handleForward(w http.ResponseWriter, r *http.Request) {
 			if len(reqs) > 0 {
 				database = reqs[0].GetDatabase()
 			}
+			// Empty database is safe: resolveFn's fail-closed path rejects it as Unauthenticated.
 			// Inject HTTP Authorization header as gRPC incoming metadata so
 			// auth.ValidateForTenant → bearerToken(ctx) works correctly.
 			if authHeader := r.Header.Get("Authorization"); authHeader != "" {
@@ -364,6 +365,7 @@ func (h *WriteHandler) handleForward(w http.ResponseWriter, r *http.Request) {
 			if len(reqs) > 0 {
 				database = reqs[0].GetDatabase()
 			}
+			// Empty database is safe: resolveFn's fail-closed path rejects it as Unauthenticated.
 			// Inject HTTP Authorization header as gRPC incoming metadata so
 			// auth.ValidateForTenant → bearerToken(ctx) works correctly.
 			if authHeader := r.Header.Get("Authorization"); authHeader != "" {
@@ -512,6 +514,8 @@ func (h *WriteHandler) handleBack(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// wcGRPCToHTTP maps gRPC status codes to HTTP status codes for WebChannel responses.
+// A separate helper (not imported from tenancy) is needed to avoid a dependency cycle.
 func wcGRPCToHTTP(c codes.Code) int {
 	switch c {
 	case codes.Unauthenticated:

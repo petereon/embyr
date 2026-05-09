@@ -299,8 +299,7 @@ func (s *Server) Run(ctx context.Context) error {
 	eg.Go(func() error {
 		<-egCtx.Done()
 		// Cancel any active BrowserChannel sessions so their gRPC handler
-		// goroutines (parented on context.Background) exit cleanly instead of
-		// outliving the HTTP server.
+		// goroutines exit cleanly instead of outliving the HTTP server.
 		s.wcMgr.Shutdown()
 		s.grpcServer.GracefulStop()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
