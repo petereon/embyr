@@ -20,6 +20,14 @@ func TestParseTenantKey(t *testing.T) {
 		{"", "", "", false},
 		{"projects/acme", "", "", false},
 		{"notapath", "", "", false},
+		// Real Firestore REST URL forms — these all fail before the fix.
+		{"/v1/projects/acme/databases/prod/documents/users/alice", "acme", "prod", true},
+		{"/v1/projects/acme/databases/prod", "acme", "prod", true},
+		{"/v1/projects/acme/databases/prod/documents:batchGet", "acme", "prod", true},
+		{"v1/projects/acme/databases/prod", "acme", "prod", true},
+		// Empty segments still rejected.
+		{"/v1/projects//databases/prod", "", "", false},
+		{"/v1/projects/acme/databases/", "", "", false},
 	}
 	for _, tc := range cases {
 		p, d, ok := tenancy.ParseTenantKey(tc.path)

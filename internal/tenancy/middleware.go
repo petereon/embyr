@@ -16,8 +16,16 @@ import (
 )
 
 // ParseTenantKey extracts (projectID, databaseID) from a Firestore resource path.
-// Accepts "projects/p/databases/d/documents/..." or "projects/p/databases/d".
+// Accepts "projects/p/databases/d/documents/..." or "projects/p/databases/d",
+// as well as Firestore REST URL paths with a leading "/v1/" prefix such as
+// "/v1/projects/p/databases/d/documents/...".
 func ParseTenantKey(path string) (projectID, databaseID string, ok bool) {
+	// Strip the REST API version prefix used by Firestore REST and gRPC-gateway URLs.
+	// Proto message fields (name, parent, database) never carry this prefix, so the
+	// strip is a no-op for gRPC paths.
+	path = strings.TrimPrefix(path, "/v1/")
+	path = strings.TrimPrefix(path, "v1/")
+
 	parts := strings.SplitN(path, "/", 5)
 	if len(parts) < 4 {
 		return "", "", false
