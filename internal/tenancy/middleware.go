@@ -61,7 +61,7 @@ func extractPathFromRequest(req interface{}) string {
 
 // UnaryInterceptor returns a gRPC unary interceptor that resolves the tenant
 // adapter from the request path and injects it into the context.
-func UnaryInterceptor(factory *AdapterFactory, log *zap.Logger) grpc.UnaryServerInterceptor {
+func UnaryInterceptor(factory FactoryLike, log *zap.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 		ctx, err := resolveTenant(ctx, factory, log, extractPathFromRequest(req))
 		if err != nil {
@@ -73,7 +73,7 @@ func UnaryInterceptor(factory *AdapterFactory, log *zap.Logger) grpc.UnaryServer
 
 // StreamInterceptor returns a gRPC stream interceptor that peeks at the first
 // message to extract the tenant key.
-func StreamInterceptor(factory *AdapterFactory, log *zap.Logger) grpc.StreamServerInterceptor {
+func StreamInterceptor(factory FactoryLike, log *zap.Logger) grpc.StreamServerInterceptor {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		wrapped := &peekStream{ServerStream: ss, factory: factory, log: log}
 		return handler(srv, wrapped)
@@ -82,7 +82,7 @@ func StreamInterceptor(factory *AdapterFactory, log *zap.Logger) grpc.StreamServ
 
 type peekStream struct {
 	grpc.ServerStream
-	factory  *AdapterFactory
+	factory  FactoryLike
 	log      *zap.Logger
 	resolved bool
 }
@@ -113,7 +113,7 @@ func (s *contextStream) Context() context.Context { return s.ctx }
 
 // HTTPMiddleware wraps an http.Handler, extracting the tenant key from the
 // URL path and injecting the adapter into the request context.
-func HTTPMiddleware(factory *AdapterFactory, log *zap.Logger, next http.Handler) http.Handler {
+func HTTPMiddleware(factory FactoryLike, log *zap.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, err := resolveTenant(r.Context(), factory, log, r.URL.Path)
 		if err != nil {
@@ -128,13 +128,13 @@ func HTTPMiddleware(factory *AdapterFactory, log *zap.Logger, next http.Handler)
 // resolveTenant looks up the tenant from the path and injects adapter + AuthInfo.
 // Both "tenant not found" and "tenant suspended" return codes.Unauthenticated
 // with a generic message to prevent tenant enumeration.
-func resolveTenant(ctx context.Context, factory *AdapterFactory, log *zap.Logger, path string) (context.Context, error) {
+func resolveTenant(ctx context.Context, factory FactoryLike, log *zap.Logger, path string) (context.Context, error) {
 	projectID, databaseID, ok := ParseTenantKey(path)
 	if !ok {
-		return ctx, nil
+		return ctx, nil // Task 3 will make this fail-closed
 	}
 
-	adapter, authCfg, err := factory.Get(ctx, projectID, databaseID)
+	adapter, authCfg, rawAuthCfg, err := factory.Get(ctx, projectID, databaseID)
 	if err != nil {
 		if errors.Is(err, ErrTenantSuspended) || errors.Is(err, registry.ErrTenantNotFound) {
 			return ctx, status.Error(codes.Unauthenticated, "unauthenticated")
@@ -147,7 +147,7 @@ func resolveTenant(ctx context.Context, factory *AdapterFactory, log *zap.Logger
 	ctx = WithAdapter(ctx, adapter)
 	ctx = WithAuthInfo(ctx, AuthInfo{
 		Mode:   authCfg.Mode(),
-		Config: authCfg.RawConfig(),
+		Config: rawAuthCfg, // now correctly populated from registry tenant.AuthConfig
 	})
 	return ctx, nil
 }

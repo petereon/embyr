@@ -30,7 +30,7 @@ func TestAdapterFactory_UnknownTenant(t *testing.T) {
 	factory := tenancy.NewAdapterFactory(reg, 10)
 	defer factory.Close()
 
-	_, _, err := factory.Get(context.Background(), "nope", "nope")
+	_, _, _, err := factory.Get(context.Background(), "nope", "nope")
 	assert.ErrorIs(t, err, registry.ErrTenantNotFound)
 }
 
@@ -44,7 +44,7 @@ func TestAdapterFactory_SuspendedTenant(t *testing.T) {
 	factory := tenancy.NewAdapterFactory(reg, 10)
 	defer factory.Close()
 
-	_, _, err := factory.Get(context.Background(), "acme", "prod")
+	_, _, _, err := factory.Get(context.Background(), "acme", "prod")
 	assert.ErrorIs(t, err, tenancy.ErrTenantSuspended)
 }
 
@@ -62,7 +62,7 @@ func TestAdapterFactory_UnknownCredentialType(t *testing.T) {
 	factory := tenancy.NewAdapterFactory(reg, 10)
 	defer factory.Close()
 
-	_, _, err := factory.Get(context.Background(), "acme", "prod")
+	_, _, _, err := factory.Get(context.Background(), "acme", "prod")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown credential type")
 }

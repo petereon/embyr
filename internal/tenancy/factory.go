@@ -18,12 +18,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// FactoryLike is the subset of AdapterFactory used by middleware.
+// Implemented by *AdapterFactory; can be replaced with a test double.
+type FactoryLike interface {
+	Get(ctx context.Context, projectID, databaseID string) (store.StorageAdapter, *auth.Config, []byte, error)
+}
+
 // ErrTenantSuspended is returned when the tenant exists but is suspended.
 var ErrTenantSuspended = errors.New("tenancy: tenant is suspended")
 
 type entry struct {
-	adapter    store.StorageAdapter
-	authConfig *auth.Config
+	adapter       store.StorageAdapter
+	authConfig    *auth.Config
+	rawAuthConfig []byte
 }
 
 // AdapterFactory lazily creates and caches StorageAdapters per tenant.
@@ -36,6 +43,7 @@ type AdapterFactory struct {
 }
 
 var _ io.Closer = (*AdapterFactory)(nil)
+var _ FactoryLike = (*AdapterFactory)(nil)
 
 // NewAdapterFactory returns a factory with an LRU cap of capacity entries.
 func NewAdapterFactory(reg registry.Client, capacity int) *AdapterFactory {
@@ -61,69 +69,73 @@ func factoryCacheKey(projectID, databaseID string) string {
 	return projectID + "\x00" + databaseID
 }
 
-// Get returns (adapter, authConfig, nil) for (projectID, databaseID).
+// Get returns (adapter, authConfig, rawAuthConfig, nil) for (projectID, databaseID).
+// rawAuthConfig is the JSON bytes from the registry (e.g. {"key":"…"}) suitable for
+// passing to auth.ValidateForTenant.
 // On cache miss: resolves credential, opens Postgres pool, pings, caches.
 // Returns ErrTenantNotFound or ErrTenantSuspended without opening a connection.
-func (f *AdapterFactory) Get(ctx context.Context, projectID, databaseID string) (store.StorageAdapter, *auth.Config, error) {
+func (f *AdapterFactory) Get(ctx context.Context, projectID, databaseID string) (store.StorageAdapter, *auth.Config, []byte, error) {
 	key := factoryCacheKey(projectID, databaseID)
 
 	f.mu.Lock()
 	if e, ok := f.cache.Get(key); ok {
 		f.mu.Unlock()
-		return e.adapter, e.authConfig, nil
+		return e.adapter, e.authConfig, e.rawAuthConfig, nil
 	}
 	f.mu.Unlock()
 
 	tenant, err := f.reg.Get(ctx, projectID, databaseID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if tenant.Status == registry.TenantStatusSuspended {
-		return nil, nil, ErrTenantSuspended
+		return nil, nil, nil, ErrTenantSuspended
 	}
 
 	resolver, err := NewResolver(tenant)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	dsn, err := resolver.Resolve(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("tenancy: resolve credential for %s/%s: %w", projectID, databaseID, err)
+		return nil, nil, nil, fmt.Errorf("tenancy: resolve credential for %s/%s: %w", projectID, databaseID, err)
 	}
 
 	dsn, err = appendSearchPath(dsn, tenant.SchemaName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("tenancy: append search_path: %w", err)
+		return nil, nil, nil, fmt.Errorf("tenancy: append search_path: %w", err)
 	}
 
 	// migrationsPath is empty: the factory does not own schema migrations.
 	adapter, err := postgres.New(dsn, "", 5)
 	if err != nil {
-		return nil, nil, fmt.Errorf("tenancy: open postgres for %s/%s: %w", projectID, databaseID, err)
+		return nil, nil, nil, fmt.Errorf("tenancy: open postgres for %s/%s: %w", projectID, databaseID, err)
 	}
 	if err := adapter.Ping(ctx); err != nil {
 		adapter.Close() //nolint:errcheck
-		return nil, nil, fmt.Errorf("tenancy: ping %s/%s: %w", projectID, databaseID, err)
+		return nil, nil, nil, fmt.Errorf("tenancy: ping %s/%s: %w", projectID, databaseID, err)
 	}
 
 	authCfg, err := buildAuthConfig(tenant)
 	if err != nil {
 		adapter.Close() //nolint:errcheck
-		return nil, nil, fmt.Errorf("tenancy: build auth config for %s/%s: %w", projectID, databaseID, err)
+		return nil, nil, nil, fmt.Errorf("tenancy: build auth config for %s/%s: %w", projectID, databaseID, err)
 	}
 
-	e := &entry{adapter: adapter, authConfig: authCfg}
+	rawAuthConfig := []byte(tenant.AuthConfig)
+
+	e := &entry{adapter: adapter, authConfig: authCfg, rawAuthConfig: rawAuthConfig}
 	f.mu.Lock()
 	if existing, ok := f.cache.Get(key); ok {
 		f.mu.Unlock()
 		adapter.Close() //nolint:errcheck
-		return existing.adapter, existing.authConfig, nil
+		return existing.adapter, existing.authConfig, existing.rawAuthConfig, nil
 	}
 	f.cache.Add(key, e)
 	f.mu.Unlock()
 
 	f.log.Info("tenancy: adapter opened", zap.String("project", projectID), zap.String("database", databaseID))
-	return adapter, authCfg, nil
+	return adapter, authCfg, rawAuthConfig, nil
 }
 
 // Close drains the LRU cache, closing all pooled adapters.
