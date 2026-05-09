@@ -108,12 +108,14 @@ func TestMultiTenant_AuthMatrix(t *testing.T) {
 	}{
 		{"no_token_tenant_a", pathA, "", http.StatusUnauthorized},
 		{"wrong_key_tenant_a", pathA, "Bearer wrong-key", http.StatusUnauthorized},
+		// Gateway routes .../documents/col/doc to ListDocuments (empty list → 200),
+		// not GetDocument (would return 404). Key assertion: auth passed, backend reached.
 		{"correct_key_tenant_a", pathA, "Bearer key-for-a", http.StatusOK},
 		{"no_token_tenant_b", pathB, "", http.StatusUnauthorized},
 		{"wrong_key_tenant_b", pathB, "Bearer wrong-key", http.StatusUnauthorized},
 		{"cross_tenant_key_a_path_b", pathB, "Bearer key-for-a", http.StatusUnauthorized},
 		{"cross_tenant_key_b_path_a", pathA, "Bearer key-for-b", http.StatusUnauthorized},
-		{"correct_key_tenant_b", pathB, "Bearer key-for-b", http.StatusOK},
+		{"correct_key_tenant_b", pathB, "Bearer key-for-b", http.StatusOK}, // same gateway routing as above
 		{"unknown_tenant", base + "/v1/projects/ghost/databases/db/documents/col/doc", "Bearer any-key", http.StatusUnauthorized},
 	}
 
